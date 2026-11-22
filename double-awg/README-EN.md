@@ -1,8 +1,8 @@
-# DoubleVPN on AmneziaWG
+# DoubleAWG on AmneziaWG
 
 [RUS](README.md) [ENG](README-EN.md)
 
-`deploy-doublevpn.sh` sets up a cascaded VPN (DoubleVPN) across two Ubuntu 24.04 VPSes using [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) as a kernel module. You run the script on your own machine (Linux or WSL), and it configures both servers over SSH.
+`deploy-doubleawg.sh` sets up a cascaded VPN (DoubleAWG) across two Ubuntu 24.04 VPSes using [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) as a kernel module. You run the script on your own machine (Linux or WSL), and it configures both servers over SSH.
 
 ```
 Clients ──IPv4──▶ VPS1 [gate1 … gateN │ inway] ══IPv6══▶ VPS2 [outway] ──IPv4/NAT──▶ Internet
@@ -26,7 +26,7 @@ Clients ──IPv4──▶ VPS1 [gate1 … gateN │ inway] ══IPv6══▶
   - `connect`: the server connects to the client. Use this for a router with a public IP: the client config gets a `ListenPort` and the server gets the client's `Endpoint`.
 - Each entry interface has its own subnet (`/8`…`/30`), and the subnets don't have to be adjacent. VPS2 doesn't need to know the client subnets, so you can add entry interfaces later without touching VPS2.
 - Management scripts on the servers: add or remove an entry interface, add or remove a client, remove the Channel.
-- ufw rules (if ufw is installed), tagged `DoubleVPN`. Migration from version 1 of the script (`door1`/`gate1`/`door2`).
+- ufw rules (if ufw is installed), tagged `DoubleAWG`.
 
 ## Requirements
 
@@ -42,14 +42,14 @@ Clients ──IPv4──▶ VPS1 [gate1 … gateN │ inway] ══IPv6══▶
 ## Quick start
 
 ```bash
-chmod +x deploy-doublevpn.sh
-./deploy-doublevpn.sh
+chmod +x deploy-doubleawg.sh
+./deploy-doubleawg.sh
 ```
 
 You can preset the defaults with `ENTRY_SSH`, `EXIT_SSH`, `ENTRY_SSH_PORT`, `EXIT_SSH_PORT` and `OUT_DIR`:
 
 ```bash
-ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 ./deploy-doublevpn.sh
+ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 ./deploy-doubleawg.sh
 ```
 
 ### What the script asks
@@ -67,11 +67,11 @@ Before installing, the script shows a summary and asks for confirmation. It sets
 
 ### Output
 
-The script creates a `doublevpn-YYYYMMDD-HHMMSS/` folder with permissions `700`:
+The script creates a `doubleawg-YYYYMMDD-HHMMSS/` folder with permissions `700`:
 
 | File | Contents |
 |---|---|
-| `doublevpn-result.txt` | nodes, addressing, all keys and obfuscation parameters (labelled), management commands |
+| `doubleawg-result.txt` | nodes, addressing, all keys and obfuscation parameters (labelled), management commands |
 | `<interface>-<client>.conf` | configs for the first clients, e.g. `gate1-client1.conf` |
 | `servers/entry/`, `servers/exit/` | copies of the configs and scripts installed on the servers |
 
@@ -108,27 +108,27 @@ The scripts aren't on `PATH`, so call them by their full path:
 D=/etc/amnezia/amneziawg
 
 # entry interfaces: interactive, or with options
-sudo $D/dvpn-gate-add.sh
-sudo $D/dvpn-gate-add.sh --awg 2 --mode listen --net 192.168.181.0/24 --port 40005 --split yes --yes
-sudo $D/dvpn-gate-add.sh --help
-sudo $D/dvpn-gate-del.sh gate2                        # removes its clients too
+sudo $D/dawg-gate-add.sh
+sudo $D/dawg-gate-add.sh --awg 2 --mode listen --net 192.168.181.0/24 --port 40005 --split yes --yes
+sudo $D/dawg-gate-add.sh --help
+sudo $D/dawg-gate-del.sh gate2                        # removes its clients too
 
 # clients
-sudo $D/dvpn-client-add.sh gate1 phone                # listen: prints the config and a QR code (if qrencode is installed)
-sudo $D/dvpn-client-add.sh gate2 router --endpoint home.example.net:51820   # connect
-sudo $D/dvpn-client-del.sh gate1 phone
+sudo $D/dawg-client-add.sh gate1 phone                # listen: prints the config and a QR code (if qrencode is installed)
+sudo $D/dawg-client-add.sh gate2 router --endpoint home.example.net:51820   # connect
+sudo $D/dawg-client-del.sh gate1 phone
 
 # split routing
-sudo $D/dvpn-entry.sh split-status
-sudo $D/dvpn-entry.sh split-up gate1
-sudo $D/dvpn-entry.sh split-down gate1
-sudo $D/dvpn-entry.sh split-update                    # refresh the list of Russian networks
+sudo $D/dawg-entry.sh split-status
+sudo $D/dawg-entry.sh split-up gate1
+sudo $D/dawg-entry.sh split-down gate1
+sudo $D/dawg-entry.sh split-update                    # refresh the list of Russian networks
 
 # remove the Channel, all entry interfaces and the timer (--purge also removes the AmneziaWG packages and the PPA)
-sudo $D/dvpn-channel-del.sh [--purge]
+sudo $D/dawg-channel-del.sh [--purge]
 ```
 
-`dvpn-gate-add.sh` options:
+`dawg-gate-add.sh` options:
 
 | Option | Meaning |
 |---|---|
@@ -144,7 +144,7 @@ Client configs are saved in `/etc/amnezia/amneziawg/clients/<interface>/<client>
 ### VPS2 (exit)
 
 ```bash
-sudo /etc/amnezia/amneziawg/dvpn-channel-del.sh [--purge]
+sudo /etc/amnezia/amneziawg/dawg-channel-del.sh [--purge]
 ```
 
 ## Split routing
@@ -152,14 +152,14 @@ sudo /etc/amnezia/amneziawg/dvpn-channel-del.sh [--purge]
 Two lines in an entry interface's `.conf` turn split routing on or off:
 
 ```ini
-PostUp = /etc/amnezia/amneziawg/dvpn-entry.sh split-up gate1
-PostDown = /etc/amnezia/amneziawg/dvpn-entry.sh split-down gate1
+PostUp = /etc/amnezia/amneziawg/dawg-entry.sh split-up gate1
+PostDown = /etc/amnezia/amneziawg/dawg-entry.sh split-down gate1
 ```
 
 Comment or uncomment both lines, then run `sudo systemctl restart awg-quick@gate1`. To switch without a restart, use `split-up` and `split-down`.
 
-- **Network list**: Russian IPv4 networks are taken from RIPE NCC delegated stats, with RIPEstat and ipdeny as fallbacks, then merged. The list lives in `dvpn-ru.txt`, and `dvpn-ru-update.timer` refreshes it weekly.
-- **Your own exceptions**: put networks that should go direct in `dvpn-ru-extra.txt`, and networks that should always go through the Channel in `dvpn-ru-exclude.txt`. Run `split-update` after editing.
+- **Network list**: Russian IPv4 networks are taken from RIPE NCC delegated stats, with RIPEstat and ipdeny as fallbacks, then merged. The list lives in `dawg-ru.txt`, and `dawg-ru-update.timer` refreshes it weekly.
+- **Your own exceptions**: put networks that should go direct in `dawg-ru-extra.txt`, and networks that should always go through the Channel in `dawg-ru-exclude.txt`. Run `split-update` after editing.
 - **Accuracy**: the list is based on where a network is registered, not where its addresses actually are.
 - **DNS**: with `1.1.1.1`, DNS queries go through the Channel, so Russian sites on CDNs may resolve to foreign addresses. With a Russian resolver (e.g. `77.88.8.8`) those sites go direct, but your DNS queries become visible in Russia.
 
@@ -177,7 +177,7 @@ TCP MSS clamping is enabled on both VPSes. The client's MTU must match its entry
 **VPS1:**
 - Each entry interface `gateN` gets its own routing table `7100+N` (`ip rule` priorities 31000/31001). The table holds `default dev inway`, plus a `blackhole` route that takes over when the Channel is down (kill switch).
 - Split routing adds `throw` routes for Russian networks to that table, plus NAT through the external interface.
-- Each interface's firewall rules are added in `PostUp` and removed in `PostDown` (`dvpn-entry.sh`).
+- Each interface's firewall rules are added in `PostUp` and removed in `PostDown` (`dawg-entry.sh`).
 
 **VPS2:**
 - Connections that arrive from `outway` are marked (`CONNMARK 0x444e0000/0xffff0000`), and NAT is applied by that mark.
@@ -185,22 +185,22 @@ TCP MSS clamping is enabled on both VPSes. The client's MTU must match its entry
 
 **rp_filter**: the Channel interfaces have no IPv4 address, so reverse-path filtering (`rp_filter`) is turned off on them. The global `all` setting is lowered to 0, and every other interface keeps its previous level. On the Channel interfaces, AmneziaWG itself checks packet sources through `AllowedIPs`.
 
-**Firewall**: iptables rules are added from `PostUp`/`PostDown`. If ufw is installed, the script adds ufw rules tagged `DoubleVPN <interface>`. It never enables or disables ufw. **Your provider's firewall** (in the hosting control panel) has to be configured by hand: open the `outway` UDP port on VPS2 and the entry interface ports on VPS1.
+**Firewall**: iptables rules are added from `PostUp`/`PostDown`. If ufw is installed, the script adds ufw rules tagged `DoubleAWG <interface>`. It never enables or disables ufw. **Your provider's firewall** (in the hosting control panel) has to be configured by hand: open the `outway` UDP port on VPS2 and the entry interface ports on VPS1.
 
 ## Removal and reinstall
 
 ```bash
-sudo /etc/amnezia/amneziawg/dvpn-channel-del.sh --purge   # VPS1 first
-sudo /etc/amnezia/amneziawg/dvpn-channel-del.sh --purge   # then VPS2
+sudo /etc/amnezia/amneziawg/dawg-channel-del.sh --purge   # VPS1 first
+sudo /etc/amnezia/amneziawg/dawg-channel-del.sh --purge   # then VPS2
 ```
 
-`net.ipv4.ip_forward` stays enabled until the next reboot. Running `deploy-doublevpn.sh` again finds and removes the previous installation on both nodes by itself, but that also removes every client, and new keys are generated. Installations from version 1 of the script are migrated automatically, and their configs are kept as `*.v1-bak`.
+`net.ipv4.ip_forward` stays enabled until the next reboot. Running `deploy-doubleawg.sh` again finds and removes the previous installation on both nodes by itself, but that also removes every client, and new keys are generated.
 
 ## Troubleshooting
 
 ```bash
 sudo awg show                                   # handshakes and counters
-sudo /etc/amnezia/amneziawg/dvpn-entry.sh split-status                 # VPS1
+sudo /etc/amnezia/amneziawg/dawg-entry.sh split-status                 # VPS1
 ip rule; ip route show table 7101 | grep -v throw
 sudo iptables -vnL FORWARD | head -20
 sudo tcpdump -ni gate1 -c 20                    # what arrives from clients

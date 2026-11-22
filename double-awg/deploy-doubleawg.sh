@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# deploy-doublevpn.sh — развертывание DoubleVPN (каскад из двух VPS) на AmneziaWG, kernel-mode.
+# deploy-doubleawg.sh — развертывание DoubleAWG (каскад из двух VPS) на AmneziaWG, kernel-mode.
 #
 #   Клиенты ──IPv4──▶ [VPS1: gate1..gateN │ inway] ══IPv6══▶ [VPS2: outway] ──IPv4/NAT──▶ Интернет
 #
@@ -18,8 +18,8 @@
 #   * Если для загрузки модуля нужна перезагрузка VPS, скрипт перезагрузит узел (с подтверждением).
 #
 # На серверах рядом с конфигами (/etc/amnezia/amneziawg) остаются скрипты управления:
-#   VPS1: dvpn-gate-add.sh, dvpn-gate-del.sh, dvpn-client-add.sh, dvpn-client-del.sh, dvpn-channel-del.sh
-#   VPS2: dvpn-channel-del.sh
+#   VPS1: dawg-gate-add.sh, dawg-gate-del.sh, dawg-client-add.sh, dawg-client-del.sh, dawg-channel-del.sh
+#   VPS2: dawg-channel-del.sh
 #
 # Машина запуска: Linux/WSL, bash 4.4+, ssh (доступ к VPS по ключу), wireguard-tools (wg), tar.
 # VPS: Ubuntu 24.04, KVM/выделенный сервер (не OpenVZ/LXC), root или sudo.
@@ -65,7 +65,7 @@ confirm() {  # confirm "вопрос" [Y|N]
   done
 }
 
-# ═══════════ общие функции: используются здесь и на серверах (копируются в dvpn-lib.sh) ═══════════
+# ═══════════ общие функции: используются здесь и на серверах (копируются в dawg-lib.sh) ═══════════
 rnd() {  # rnd MIN MAX — криптостойкое случайное целое
   local min=$1 max=$2 r
   r=$(od -An -N4 -tu4 /dev/urandom | tr -d ' \n')
@@ -197,7 +197,7 @@ ssh_cmd() {  # ssh_cmd NODE [-t] команда...
 
 run_root() {  # run_root NODE ЛОКАЛЬНЫЙ_СКРИПТ — выполнить на узле от root
   local n=$1 file=$2 remote pre cmd
-  remote="/tmp/dvpn-$(date +%s)-$RANDOM.sh"
+  remote="/tmp/dawg-$(date +%s)-$RANDOM.sh"
   ssh_cmd "$n" "umask 077 && cat > '$remote'" < "$file"
   case ${SUDO_MODE[$n]} in
     root)     pre="" ;;
@@ -296,7 +296,7 @@ echo "LINKS=$(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
 echo "ROUTES4=$(ip -4 route show table main 2>/dev/null | awk '$1 != "default" { n = ""; d = "-"; for (i = 1; i <= NF; i++) { if (n == "" && $i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) n = $i; if ($i == "dev") d = $(i + 1) } if (n != "") { if (n !~ /\//) n = n "/32"; print n "@" d } }' | tr '\n' ' ')"h=$(apt-cache policy "linux-headers-$(uname -r)" 2>/dev/null | awk '/Candidate:/ {print $2}')
 echo "HEADERS=${h:-none}"
 if [ -f /var/run/reboot-required ]; then echo "REBOOT=yes"; else echo "REBOOT=no"; fi
-chk='D=/etc/amnezia/amneziawg; if [ -f $D/dvpn.env ]; then echo v2; elif [ -f $D/dvpn-entry.sh ] || [ -f $D/dvpn-exit.sh ]; then echo v1; else echo none; fi'
+chk='D=/etc/amnezia/amneziawg; if [ -f $D/dawg.env ]; then echo v2; else echo none; fi'
 case $s in
   root) p=$(sh -c "$chk") ;;
   nopasswd) p=$(sudo -n sh -c "$chk") ;;
@@ -343,10 +343,8 @@ check_node() {
     warn "$label: система ждет перезагрузки (/var/run/reboot-required); при необходимости скрипт предложит перезагрузить VPS."
   fi
   case $(nfo "$n" PREV) in
-    v2) warn "$label: найдена предыдущая установка DoubleVPN — она будет полностью удалена (вместе с клиентами)."
+    v2) warn "$label: найдена предыдущая установка DoubleAWG — она будет полностью удалена (вместе с клиентами)."
         confirm "Удалить и установить заново?" N || exit 1 ;;
-    v1) warn "$label: найдена установка DoubleVPN v1 (door1/gate1/door2) — она будет удалена, конфиги сохранятся как *.v1-bak."
-        confirm "Продолжить?" Y || exit 1 ;;
   esac
 }
 
@@ -400,10 +398,10 @@ ask_awg_version() {  # ask_awg_version VAR "вопрос" ПО_УМОЛЧАНИ�
 src_lib() {
   cat <<'LIB'
 #!/bin/bash
-# DoubleVPN: общие функции и параметры узла. Подключается остальными dvpn-*.sh, сам не запускается.
-D=${DVPN_DIR:-/etc/amnezia/amneziawg}
+# DoubleAWG: общие функции и параметры узла. Подключается остальными dawg-*.sh, сам не запускается.
+D=${DAWG_DIR:-/etc/amnezia/amneziawg}
 KEYGEN="awg genkey"
-if [ -f "$D/dvpn.env" ]; then . "$D/dvpn.env"; fi
+if [ -f "$D/dawg.env" ]; then . "$D/dawg.env"; fi
 OBF_KEYS='Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4|I1|I2|I3|I4|I5|HeaderProtectionKey|ContentPaddingAddition|RandomTrailers|DisableCookies|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts'
 
 _clr() { if [ -t 2 ]; then printf '\033[%sm' "$1"; fi; }
@@ -411,7 +409,7 @@ log()  { printf '%s[%s]%s %s\n' "$(_clr '1;36')" "$(hostname)" "$(_clr 0)" "$*" 
 warn() { printf '%s[%s] !%s %s\n' "$(_clr '1;33')" "$(hostname)" "$(_clr 0)" "$*" >&2; }
 die()  { printf '%s[%s] ОШИБКА:%s %s\n' "$(_clr '1;31')" "$(hostname)" "$(_clr 0)" "$*" >&2; exit 1; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "нужны права root: sudo $0"; }
-need_role() { [ "${DVPN_ROLE:-}" = "$1" ] || die "скрипт для узла '$1', а этот узел: '${DVPN_ROLE:-не настроен}'"; }
+need_role() { [ "${DAWG_ROLE:-}" = "$1" ] || die "скрипт для узла '$1', а этот узел: '${DAWG_ROLE:-не настроен}'"; }
 has_tty() { { true </dev/tty; } 2>/dev/null; }
 ask() {
   local __v=$1 __p=$2 __d=${3-} __a=""
@@ -438,7 +436,7 @@ link_up() { [ -n "$(ip link show "$1" up 2>/dev/null)" ]; }
 port_busy() { ss -Hlun 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"; }
 gates_all() {
   local f
-  for f in "$D"/dvpn-gates/*.env; do
+  for f in "$D"/dawg-gates/*.env; do
     [ -e "$f" ] || continue
     f=${f##*/}; echo "${f%.env}"
   done
@@ -450,7 +448,7 @@ ipt() {  # ipt add|del БИНАРЬ ТАБЛИЦА ЦЕПОЧКА правило
     del) while "$bin" -t "$tbl" -C "$chain" "$@" 2>/dev/null; do "$bin" -t "$tbl" -D "$chain" "$@"; done ;;
   esac
 }
-ufw_dvpn_del() {  # ufw_dvpn_del МЕТКА — удалить правила ufw, comment которых начинается с МЕТКИ
+ufw_dawg_del() {  # ufw_dawg_del МЕТКА — удалить правила ufw, comment которых начинается с МЕТКИ
   command -v ufw >/dev/null 2>&1 || return 0
   local tag=$1 n l
   if ufw status 2>/dev/null | grep -q '^Status: active'; then
@@ -464,15 +462,15 @@ ufw_dvpn_del() {  # ufw_dvpn_del МЕТКА — удалить правила uf
     done
   fi
 }
-ufw_dvpn_add() {  # ufw_dvpn_add МЕТКА "правило" ... — правила ufw (старые с той же меткой удаляются)
+ufw_dawg_add() {  # ufw_dawg_add МЕТКА "правило" ... — правила ufw (старые с той же меткой удаляются)
   local tag=$1 r; shift
   if ! command -v ufw >/dev/null 2>&1; then log "ufw не установлен — правила ufw пропущены"; return 0; fi
-  ufw_dvpn_del "$tag"
+  ufw_dawg_del "$tag"
   for r in "$@"; do eval "ufw $r" >/dev/null || warn "ufw: не удалось добавить: $r"; done
   log "ufw: правила '${tag% }' добавлены"
 }
 awg_check_conf() {  # awg_check_conf CONF — принимают ли модуль и awg параметры конфига
-  local f=$1 t="dvpnchk$$" tmp rc=0
+  local f=$1 t="dawgchk$$" tmp rc=0
   t=${t:0:15}; tmp=$(mktemp)
   if ! awg-quick strip "$f" 2>/dev/null | grep -v '^ListenPort' > "$tmp"; then rm -f "$tmp"; return 1; fi
   if ! ip link add "$t" type amneziawg 2>/dev/null; then rm -f "$tmp"; warn "не удалось создать тестовый интерфейс amneziawg"; return 1; fi
@@ -510,14 +508,14 @@ LIB
 src_entry_hooks() {
   cat <<'HOOKS'
 #!/bin/bash
-# DoubleVPN: правила входного узла (VPS1).
+# DoubleAWG: правила входного узла (VPS1).
 #   Из PostUp/PostDown:  channel-up | channel-down | gate-up <имя> | gate-down <имя>
 #   Вручную:             split-up <имя> | split-down <имя> | split-status [<имя>] | split-update
 set -u
-. "${DVPN_DIR:-/etc/amnezia/amneziawg}/dvpn-lib.sh"
-RU_LIST="$D/dvpn-ru.txt"            # российские IPv4-подсети (обновляется: split-update, таймер)
-RU_EXTRA="$D/dvpn-ru-extra.txt"     # свои подсети НАПРЯМУЮ (CIDR по строке)
-RU_EXCLUDE="$D/dvpn-ru-exclude.txt" # подсети всегда В КАНАЛ, даже российские
+. "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
+RU_LIST="$D/dawg-ru.txt"            # российские IPv4-подсети (обновляется: split-update, таймер)
+RU_EXTRA="$D/dawg-ru-extra.txt"     # свои подсети НАПРЯМУЮ (CIDR по строке)
+RU_EXCLUDE="$D/dawg-ru-exclude.txt" # подсети всегда В КАНАЛ, даже российские
 RU_SOURCES=(
   "delegated https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-latest"
   "ripestat https://stat.ripe.net/data/country-resource-list/data.json?resource=RU&v4_format=prefix"
@@ -525,9 +523,9 @@ RU_SOURCES=(
 )
 
 gate_load() {
-  [ -f "$D/dvpn-gates/$1.env" ] || die "нет входного интерфейса '$1'"
-  . "$D/dvpn-gates/$1.env"
-  TBL=$(( RT_BASE + GATE_NUM )); FLAG="/run/dvpn-split.$GATE_NAME"
+  [ -f "$D/dawg-gates/$1.env" ] || die "нет входного интерфейса '$1'"
+  . "$D/dawg-gates/$1.env"
+  TBL=$(( RT_BASE + GATE_NUM )); FLAG="/run/dawg-split.$GATE_NAME"
 }
 gate_fw() {
   local op=$1 G=$GATE_NAME
@@ -674,14 +672,14 @@ HOOKS
 src_exit_hooks() {
   cat <<'HOOKS'
 #!/bin/bash
-# DoubleVPN: правила выходного узла (VPS2). Вызывается из PostUp/PostDown интерфейса Канала:
+# DoubleAWG: правила выходного узла (VPS2). Вызывается из PostUp/PostDown интерфейса Канала:
 #   channel-up | channel-down
 #
 # Подсети клиентов VPS2 не знает: соединения, пришедшие из Канала, помечаются (CONNMARK),
 # по метке делается NAT, а ответы по метке возвращаются в Канал через свою таблицу маршрутизации.
 # Поэтому на VPS1 можно добавлять входные интерфейсы с любыми подсетями, не меняя VPS2.
 set -u
-. "${DVPN_DIR:-/etc/amnezia/amneziawg}/dvpn-lib.sh"
+. "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
 MARK=0x444e0000/0xffff0000   # метка соединений из Канала
 TBL=7100                     # таблица: default dev $OUTWAY_IF
 rules() {
@@ -719,9 +717,9 @@ HOOKS
 src_gate_add() {
   cat <<'GADD'
 #!/bin/bash
-# DoubleVPN: добавить входной интерфейс клиентов (VPS1).
-#   dvpn-gate-add.sh                 — интерактивно
-#   dvpn-gate-add.sh --awg 2 --mode listen --port 40002 --split yes --yes
+# DoubleAWG: добавить входной интерфейс клиентов (VPS1).
+#   dawg-gate-add.sh                 — интерактивно
+#   dawg-gate-add.sh --awg 2 --mode listen --port 40002 --split yes --yes
 # Параметры: --awg 1|1.5|2|3|3.1  --mode listen|connect  --net A.B.C.D/N  --port N  --num N
 #            --dns "..."  --split yes|no  --i1 yes|no  --yes (без вопросов, значения по умолчанию)
 #   listen  — клиенты подключаются к серверу (у клиента Endpoint сервера)
@@ -731,7 +729,7 @@ src_gate_add() {
 # Имя интерфейса: <префикс><номер>.
 # Приватный ключ можно передать в переменной GATE_PRIV, иначе генерируется (awg genkey).
 set -Eeuo pipefail
-. "${DVPN_DIR:-/etc/amnezia/amneziawg}/dvpn-lib.sh"
+. "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
 need_root; need_role entry
 
 AWGV=""; MODE=""; PORT=""; NUM=""; DNS=""; SPLIT=""; USE_I1=""; NET=""; MTU=""; YES=no
@@ -754,9 +752,9 @@ done
 
 used_nums=" "; used_ports=" "; used_nets=""
 for g in $(gates_all); do
-  used_nums+="$(. "$D/dvpn-gates/$g.env"; echo "$GATE_NUM") "
-  used_ports+="$(. "$D/dvpn-gates/$g.env"; echo "$GATE_PORT") "
-  used_nets+="$(. "$D/dvpn-gates/$g.env"; echo "$GATE_NET") "
+  used_nums+="$(. "$D/dawg-gates/$g.env"; echo "$GATE_NUM") "
+  used_ports+="$(. "$D/dawg-gates/$g.env"; echo "$GATE_PORT") "
+  used_nets+="$(. "$D/dawg-gates/$g.env"; echo "$GATE_NET") "
 done
 # подсети, уже известные системе (интерфейсы, маршруты), — чтобы не пересечься
 sys_nets=$(ip -4 route show table main 2>/dev/null | awk '$1 != "default" { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { n = $i; if (n !~ /\//) n = n "/32"; print n; break } }' | tr '\n' ' ' || true)
@@ -822,69 +820,69 @@ if [ "$MODE" = listen ]; then MT="listen: клиенты подключаютс�
 if [ "$SPLIT" = yes ]; then c=""; else c="#"; fi
 
 umask 077
-install -d -m 700 "$D/dvpn-gates" "$D/clients"
+install -d -m 700 "$D/dawg-gates" "$D/clients"
 {
-  echo "# DoubleVPN / AmneziaWG $AWGV — входной интерфейс $NAME ($MT)"
+  echo "# DoubleAWG / AmneziaWG $AWGV — входной интерфейс $NAME ($MT)"
   echo "[Interface]"
   echo "PrivateKey = $PRIV"
   echo "Address = $GIP/$NLEN"
   echo "ListenPort = $PORT"
   echo "MTU = $MTU"
   obf_lines
-  echo "PostUp = $D/dvpn-entry.sh gate-up $NAME"
-  echo "PostDown = $D/dvpn-entry.sh gate-down $NAME"
+  echo "PostUp = $D/dawg-entry.sh gate-up $NAME"
+  echo "PostDown = $D/dawg-entry.sh gate-down $NAME"
   echo "#"
   echo "# ── Split ───────────────────────────────────────────────────────────────────"
   echo "# Трафик к российским IP — напрямую с этого VPS, остальное — в Канал."
   echo "# Включить/выключить: раскомментировать/закомментировать ДВЕ строки ниже, затем"
   echo "#   systemctl restart awg-quick@$NAME"
-  echo "# Без перезапуска: $D/dvpn-entry.sh split-up|split-down|split-status $NAME"
-  echo "${c}PostUp = $D/dvpn-entry.sh split-up $NAME"
-  echo "${c}PostDown = $D/dvpn-entry.sh split-down $NAME"
+  echo "# Без перезапуска: $D/dawg-entry.sh split-up|split-down|split-status $NAME"
+  echo "${c}PostUp = $D/dawg-entry.sh split-up $NAME"
+  echo "${c}PostDown = $D/dawg-entry.sh split-down $NAME"
   echo "#"
-  echo "# Клиенты: $D/dvpn-client-add.sh $NAME <имя>   |   $D/dvpn-client-del.sh $NAME <имя>"
+  echo "# Клиенты: $D/dawg-client-add.sh $NAME <имя>   |   $D/dawg-client-del.sh $NAME <имя>"
 } > "$D/$NAME.conf"
 printf '%s=%q\n' GATE_NAME "$NAME" GATE_NUM "$NUM" GATE_AWG "$AWGV" GATE_MODE "$MODE" GATE_PORT "$PORT" \
-  GATE_NET "$NET" GATE_IP "$GIP" GATE_MTU "$MTU" GATE_DNS "$DNS" > "$D/dvpn-gates/$NAME.env"
+  GATE_NET "$NET" GATE_IP "$GIP" GATE_MTU "$MTU" GATE_DNS "$DNS" > "$D/dawg-gates/$NAME.env"
 
 if ! awg_check_conf "$D/$NAME.conf"; then
-  mv -f "$D/$NAME.conf" "$D/$NAME.conf.rejected"; rm -f "$D/dvpn-gates/$NAME.env"
+  mv -f "$D/$NAME.conf" "$D/$NAME.conf.rejected"; rm -f "$D/dawg-gates/$NAME.env"
   die "AmneziaWG на сервере не принял конфиг версии $AWGV (сохранен как $D/$NAME.conf.rejected)"
 fi
-ufw_dvpn_add "DoubleVPN $NAME " \
-  "allow $PORT/udp comment 'DoubleVPN $NAME port'" \
-  "route allow in on $NAME out on $INWAY_IF comment 'DoubleVPN $NAME channel'" \
-  "route allow in on $NAME out on $WAN_IF comment 'DoubleVPN $NAME split'"
+ufw_dawg_add "DoubleAWG $NAME " \
+  "allow $PORT/udp comment 'DoubleAWG $NAME port'" \
+  "route allow in on $NAME out on $INWAY_IF comment 'DoubleAWG $NAME channel'" \
+  "route allow in on $NAME out on $WAN_IF comment 'DoubleAWG $NAME split'"
 systemctl enable -q "awg-quick@$NAME"
 if ! systemctl restart "awg-quick@$NAME"; then
   journalctl -u "awg-quick@$NAME" -n 30 --no-pager || true
   die "не удалось поднять $NAME"
 fi
 log "Входной интерфейс $NAME: AWG $AWGV, $MODE, порт $PORT/udp, сеть $NET, split=$SPLIT"
-log "Добавить клиента: $D/dvpn-client-add.sh $NAME <имя>"
+log "Добавить клиента: $D/dawg-client-add.sh $NAME <имя>"
 GADD
 }
 
 src_gate_del() {
   cat <<'GDEL'
 #!/bin/bash
-# DoubleVPN: удалить входной интерфейс клиентов вместе с его клиентами (VPS1).
-#   dvpn-gate-del.sh <интерфейс> [--yes]
+# DoubleAWG: удалить входной интерфейс клиентов вместе с его клиентами (VPS1).
+#   dawg-gate-del.sh <интерфейс> [--yes]
 set -Eeuo pipefail
-. "${DVPN_DIR:-/etc/amnezia/amneziawg}/dvpn-lib.sh"
+. "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
 need_root; need_role entry
 G=${1-}; YES=${2-}
 if [ -z "$G" ]; then sed -n '2,3p' "$0"; echo "Входные интерфейсы: $(gates_all | tr '\n' ' ')"; exit 1; fi
-[ -f "$D/dvpn-gates/$G.env" ] || die "нет входного интерфейса $G (есть: $(gates_all | tr '\n' ' '))"
+[ -f "$D/dawg-gates/$G.env" ] || die "нет входного интерфейса $G (есть: $(gates_all | tr '\n' ' '))"
 n=$(grep -c '^# client: ' "$D/$G.conf" 2>/dev/null || true)
 if [ "$YES" != --yes ]; then confirm "Удалить входной интерфейс $G и его клиентов (${n:-0})?" N || exit 0; fi
 systemctl disable --now "awg-quick@$G" 2>/dev/null || true
 if link_exists "$G"; then awg-quick down "$G" 2>/dev/null || ip link del "$G" 2>/dev/null || true; fi
-"$D/dvpn-entry.sh" gate-down "$G" 2>/dev/null || true   # на случай, если PostDown не отработал
-ufw_dvpn_del "DoubleVPN $G "
-rm -f "$D/$G.conf" "$D/$G.conf".bak-* "$D/$G.conf.rejected" "/run/dvpn-split.$G"
+"$D/dawg-entry.sh" gate-down "$G" 2>/dev/null || true   # на случай, если PostDown не отработал
+ufw_dawg_del "DoubleAWG $G "
+rm -f "$D/$G.conf" "$D/$G.conf".bak-* "$D/$G.conf.rejected" "/run/dawg-split.$G"
 rm -rf "${D:?}/clients/$G"
-rm -f "$D/dvpn-gates/$G.env"
+rm -f "$D/dawg-gates/$G.env"
 systemctl reset-failed "awg-quick@$G" 2>/dev/null || true
 log "Входной интерфейс $G удален"
 GDEL
@@ -893,13 +891,13 @@ GDEL
 src_client_add() {
   cat <<'CADD'
 #!/bin/bash
-# DoubleVPN: добавить клиента входного интерфейса (VPS1).
-#   dvpn-client-add.sh <интерфейс> <имя клиента> [--endpoint host:port] [--dns "..."] [--quiet]
+# DoubleAWG: добавить клиента входного интерфейса (VPS1).
+#   dawg-client-add.sh <интерфейс> <имя клиента> [--endpoint host:port] [--dns "..."] [--quiet]
 #   --endpoint — для интерфейса в режиме connect: адрес и порт, на которых слушает клиент.
 # Конфиг клиента сохраняется в /etc/amnezia/amneziawg/clients/<интерфейс>/<имя>.conf и выводится на экран.
 # Ключи можно передать в CLIENT_PRIV / CLIENT_PSK, иначе генерируются (awg).
 set -Eeuo pipefail
-. "${DVPN_DIR:-/etc/amnezia/amneziawg}/dvpn-lib.sh"
+. "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
 need_root; need_role entry
 if [ $# -lt 2 ]; then sed -n '2,6p' "$0"; echo "Входные интерфейсы: $(gates_all | tr '\n' ' ')"; exit 1; fi
 G=$1; CN=$2; shift 2
@@ -912,8 +910,8 @@ while [ $# -gt 0 ]; do
     *) die "неизвестный параметр: $1" ;;
   esac
 done
-[ -f "$D/dvpn-gates/$G.env" ] || die "нет входного интерфейса $G (есть: $(gates_all | tr '\n' ' '))"
-. "$D/dvpn-gates/$G.env"
+[ -f "$D/dawg-gates/$G.env" ] || die "нет входного интерфейса $G (есть: $(gates_all | tr '\n' ' '))"
+. "$D/dawg-gates/$G.env"
 CONF="$D/$G.conf"
 [[ $CN =~ ^[A-Za-z0-9_.-]{1,32}$ ]] || die "имя клиента: латиница, цифры, _ . - (до 32 символов)"
 ! grep -qxF "# client: $CN" "$CONF" || die "клиент $CN уже есть на $G"
@@ -925,7 +923,7 @@ if [ "$GATE_MODE" = connect ]; then
 fi
 [ -n "$DNS" ] || DNS=$GATE_DNS
 
-cidr_parse "$GATE_NET" || die "в $D/dvpn-gates/$G.env некорректная подсеть: $GATE_NET"
+cidr_parse "$GATE_NET" || die "в $D/dawg-gates/$G.env некорректная подсеть: $GATE_NET"
 used=" $(sed -n 's/^AllowedIPs[[:space:]]*=[[:space:]]*\([0-9.]*\)\/32.*/\1/p' "$CONF" | tr '\n' ' ') $GATE_IP "
 CIP=""
 for (( n = C_NET + 1; n < C_LAST; n++ )); do
@@ -958,9 +956,9 @@ install -d -m 700 "$D/clients/$G"
 OUTF="$D/clients/$G/$CN.conf"
 {
   if [ "$GATE_MODE" = listen ]; then
-    echo "# DoubleVPN / AmneziaWG $GATE_AWG — клиент '$CN' интерфейса $G (подключается к ${PUB4}:${GATE_PORT})"
+    echo "# DoubleAWG / AmneziaWG $GATE_AWG — клиент '$CN' интерфейса $G (подключается к ${PUB4}:${GATE_PORT})"
   else
-    echo "# DoubleVPN / AmneziaWG $GATE_AWG — клиент '$CN' интерфейса $G (сервер подключается к клиенту на $EP)"
+    echo "# DoubleAWG / AmneziaWG $GATE_AWG — клиент '$CN' интерфейса $G (сервер подключается к клиенту на $EP)"
   fi
   echo "[Interface]"
   echo "PrivateKey = $PRIV"
@@ -992,15 +990,15 @@ CADD
 src_client_del() {
   cat <<'CDEL'
 #!/bin/bash
-# DoubleVPN: удалить клиента входного интерфейса (VPS1).
-#   dvpn-client-del.sh <интерфейс> <имя клиента>
+# DoubleAWG: удалить клиента входного интерфейса (VPS1).
+#   dawg-client-del.sh <интерфейс> <имя клиента>
 set -Eeuo pipefail
-. "${DVPN_DIR:-/etc/amnezia/amneziawg}/dvpn-lib.sh"
+. "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
 need_root; need_role entry
 if [ $# -lt 2 ]; then sed -n '2,3p' "$0"; exit 1; fi
 G=$1; CN=$2
 CONF="$D/$G.conf"
-[ -f "$D/dvpn-gates/$G.env" ] || die "нет входного интерфейса $G"
+[ -f "$D/dawg-gates/$G.env" ] || die "нет входного интерфейса $G"
 grep -qxF "# client: $CN" "$CONF" || die "на $G нет клиента $CN (есть: $(sed -n 's/^# client: //p' "$CONF" | tr '\n' ' '))"
 umask 077
 awk -v n="# client: $CN" '
@@ -1018,55 +1016,55 @@ CDEL
 src_channel_del() {
   cat <<'CHDEL'
 #!/bin/bash
-# DoubleVPN: удалить Канал с этого узла.
+# DoubleAWG: удалить Канал с этого узла.
 #   VPS1: интерфейс Канала, все входные интерфейсы и клиентов, таймер списка RU.
 #   VPS2: интерфейс Канала.
-# Правила iptables/ip rule снимаются, правила ufw с пометкой DoubleVPN удаляются.
-#   dvpn-channel-del.sh [--yes] [--purge]   (--purge — удалить и пакеты AmneziaWG, модуль, PPA)
+# Правила iptables/ip rule снимаются, правила ufw с пометкой DoubleAWG удаляются.
+#   dawg-channel-del.sh [--yes] [--purge]   (--purge — удалить и пакеты AmneziaWG, модуль, PPA)
 set -Eeuo pipefail
-. "${DVPN_DIR:-/etc/amnezia/amneziawg}/dvpn-lib.sh"
+. "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
 need_root
 YES=no; PURGE=no
 for a in "$@"; do
   case $a in --yes|-y) YES=yes ;; --purge) PURGE=yes ;; -h|--help) sed -n '2,7p' "$0"; exit 0 ;; *) die "неизвестный параметр: $a" ;; esac
 done
-[ -n "${DVPN_ROLE:-}" ] || die "не найден $D/dvpn.env — DoubleVPN на этом узле не установлен"
-if [ "$DVPN_ROLE" = entry ]; then
+[ -n "${DAWG_ROLE:-}" ] || die "не найден $D/dawg.env — DoubleAWG на этом узле не установлен"
+if [ "$DAWG_ROLE" = entry ]; then
   what="Канал ($INWAY_IF) и входные интерфейсы: $(gates_all | tr '\n' ' ')"
 else
   what="Канал ($OUTWAY_IF)"
 fi
 if [ "$YES" != yes ]; then confirm "Удалить с этого узла: $what?" N || exit 0; fi
 
-if [ "$DVPN_ROLE" = entry ]; then
-  for g in $(gates_all); do "$D/dvpn-gate-del.sh" "$g" --yes || warn "не удалось удалить $g"; done
+if [ "$DAWG_ROLE" = entry ]; then
+  for g in $(gates_all); do "$D/dawg-gate-del.sh" "$g" --yes || warn "не удалось удалить $g"; done
   systemctl disable --now "awg-quick@$INWAY_IF" 2>/dev/null || true
   if link_exists "$INWAY_IF"; then awg-quick down "$INWAY_IF" 2>/dev/null || ip link del "$INWAY_IF" 2>/dev/null || true; fi
-  "$D/dvpn-entry.sh" channel-down 2>/dev/null || true
-  systemctl disable --now dvpn-ru-update.timer 2>/dev/null || true
-  rm -f /etc/systemd/system/dvpn-ru-update.service /etc/systemd/system/dvpn-ru-update.timer
+  "$D/dawg-entry.sh" channel-down 2>/dev/null || true
+  systemctl disable --now dawg-ru-update.timer 2>/dev/null || true
+  rm -f /etc/systemd/system/dawg-ru-update.service /etc/systemd/system/dawg-ru-update.timer
   systemctl daemon-reload
-  rm -f "$D/$INWAY_IF.conf" "$D/$INWAY_IF.conf".bak-* "$D"/dvpn-ru*.txt /run/dvpn-split.*
-  rm -rf "${D:?}/dvpn-gates" "${D:?}/clients"
+  rm -f "$D/$INWAY_IF.conf" "$D/$INWAY_IF.conf".bak-* "$D"/dawg-ru*.txt /run/dawg-split.*
+  rm -rf "${D:?}/dawg-gates" "${D:?}/clients"
   systemctl reset-failed "awg-quick@$INWAY_IF" 2>/dev/null || true
 else
   systemctl disable --now "awg-quick@$OUTWAY_IF" 2>/dev/null || true
   if link_exists "$OUTWAY_IF"; then awg-quick down "$OUTWAY_IF" 2>/dev/null || ip link del "$OUTWAY_IF" 2>/dev/null || true; fi
-  "$D/dvpn-exit.sh" channel-down 2>/dev/null || true
+  "$D/dawg-exit.sh" channel-down 2>/dev/null || true
   rm -f "$D/$OUTWAY_IF.conf" "$D/$OUTWAY_IF.conf".bak-*
   systemctl reset-failed "awg-quick@$OUTWAY_IF" 2>/dev/null || true
 fi
-ufw_dvpn_del "DoubleVPN"
-rm -f /etc/sysctl.d/99-doublevpn.conf
+ufw_dawg_del "DoubleAWG"
+rm -f /etc/sysctl.d/99-doubleawg.conf
 sysctl -qw "net.ipv4.conf.all.rp_filter=$(cat /proc/sys/net/ipv4/conf/default/rp_filter 2>/dev/null || echo 2)" || true
-rm -f "$D"/dvpn-*.sh "$D"/dvpn-*.sh.bak-* "$D/dvpn.env" "$D/dvpn.env".bak-*
+rm -f "$D"/dawg-*.sh "$D"/dawg-*.sh.bak-* "$D/dawg.env" "$D/dawg.env".bak-*
 if [ "$PURGE" = yes ]; then
   log "Удаление пакетов AmneziaWG"
   modprobe -r amneziawg 2>/dev/null || warn "модуль занят другими интерфейсами — выгрузится после перезагрузки"
   apt-get -y -q purge amneziawg amneziawg-tools || true
   add-apt-repository -y --remove ppa:amnezia/ppa || true
 fi
-log "DoubleVPN удален с узла. net.ipv4.ip_forward остается включенным до перезагрузки."
+log "DoubleAWG удален с узла. net.ipv4.ip_forward остается включенным до перезагрузки."
 CHDEL
 }
 
@@ -1077,7 +1075,6 @@ set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C
 D=/etc/amnezia/amneziawg
 H=$(hostname)
-LEGACY=0
 log()  { printf '\033[1;36m[%s]\033[0m %s\n' "$H" "$*"; }
 warn() { printf '\033[1;33m[%s] !\033[0m %s\n' "$H" "$*"; }
 die()  { printf '\033[1;31m[%s] ОШИБКА:\033[0m %s\n' "$H" "$*" >&2; exit 1; }
@@ -1097,21 +1094,9 @@ HEAD
 emit_cleanup() {
   cat <<'CLEAN'
 # ── предыдущие установки ──
-if [ -f "$D/dvpn.env" ] && [ -x "$D/dvpn-channel-del.sh" ]; then
-  log "Удаление предыдущей установки DoubleVPN"
-  "$D/dvpn-channel-del.sh" --yes || warn "предыдущая установка удалена не полностью"
-elif [ -f "$D/dvpn-entry.sh" ] || [ -f "$D/dvpn-exit.sh" ]; then
-  log "Удаление установки DoubleVPN v1 (конфиги сохраняются как *.v1-bak)"
-  LEGACY=1
-  for i in gate1 door1 door2; do
-    if [ -f "$D/$i.conf" ] && grep -q 'DoubleVPN' "$D/$i.conf"; then
-      systemctl disable --now "awg-quick@$i" 2>/dev/null || true
-      mv -f "$D/$i.conf" "$D/$i.conf.v1-bak"
-    fi
-  done
-  ip -4 route flush table 7001 2>/dev/null || true
-  systemctl disable --now dvpn-ru-update.timer 2>/dev/null || true
-  rm -f "$D/dvpn-entry.sh" "$D/dvpn-exit.sh"
+if [ -f "$D/dawg.env" ] && [ -x "$D/dawg-channel-del.sh" ]; then
+  log "Удаление предыдущей установки DoubleAWG"
+  "$D/dawg-channel-del.sh" --yes || warn "предыдущая установка удалена не полностью"
 fi
 for i in $IFACES; do
   if ip link show "$i" >/dev/null 2>&1; then
@@ -1168,12 +1153,12 @@ if [ -n "$loaded" ] && [ "$loaded" != "$avail" ]; then
     need_reboot "в памяти старый модуль $loaded (установлен $avail), выгрузить его без перезагрузки нельзя"
   fi
 fi
-if ! modprobe amneziawg 2>/tmp/dvpn-modprobe.err; then
-  if grep -qiE 'key was rejected|required key not available|lockdown' /tmp/dvpn-modprobe.err \
+if ! modprobe amneziawg 2>/tmp/dawg-modprobe.err; then
+  if grep -qiE 'key was rejected|required key not available|lockdown' /tmp/dawg-modprobe.err \
      || dmesg 2>/dev/null | tail -n 50 | grep -qiE 'lockdown|module verification failed'; then
     die "ядро отклонило неподписанный модуль (Secure Boot). Отключите Secure Boot в панели VPS или зарегистрируйте ключ DKMS через mokutil"
   fi
-  die "не удалось загрузить модуль amneziawg: $(cat /tmp/dvpn-modprobe.err)"
+  die "не удалось загрузить модуль amneziawg: $(cat /tmp/dawg-modprobe.err)"
 fi
 if [ "$NEWEST" != "$KREL" ] && ! modinfo -k "$NEWEST" amneziawg >/dev/null 2>&1; then
   warn "установлено ядро $NEWEST, но модуль под него не собран — после перезагрузки VPN не поднимется (см. 'dkms status')"
@@ -1187,24 +1172,23 @@ emit_file() {  # emit_file УДАЛЕННЫЙ_ПУТЬ РЕЖИМ ЛОКАЛЬН
   local path=$1 mode=$2 src=$3
   printf 'install -d -m 700 %q\n' "$(dirname "$path")"
   printf 'if [ -f %q ]; then cp -a %q %q.bak-$(date +%%Y%%m%%d-%%H%%M%%S); fi\n' "$path" "$path" "$path"
-  printf "cat > %q <<'__DVPN_EOF__'\n" "$path"
+  printf "cat > %q <<'__DAWG_EOF__'\n" "$path"
   cat "$src"
-  printf '__DVPN_EOF__\nchmod %s %q\n' "$mode" "$path"
+  printf '__DAWG_EOF__\nchmod %s %q\n' "$mode" "$path"
 }
 
-emit_after_files() {  # общее после записи файлов: lib, очистка ufw от v1, проверка конфига Канала, sysctl
+emit_after_files() {  # общее после записи файлов: lib, проверка конфига Канала, sysctl
   cat <<'AFTER'
-. "$D/dvpn-lib.sh"
-if [ "$LEGACY" = 1 ]; then ufw_dvpn_del "DoubleVPN"; fi
+. "$D/dawg-lib.sh"
 CH_IF=${INWAY_IF:-${OUTWAY_IF:-}}
 log "Проверка конфига Канала $CH_IF (AWG $CHANNEL_AWG)"
 awg_check_conf "$D/$CH_IF.conf" || die "AmneziaWG на сервере не принял конфиг Канала версии $CHANNEL_AWG"
 # rp_filter: all=0 (на интерфейсах Канала нет IPv4-адреса), остальные интерфейсы сохраняют свой уровень
 rpf_protect
-printf '%s\n' "# DoubleVPN: форвардинг; rp_filter выключается только на интерфейсах Канала (см. dvpn-lib.sh rpf_relax)," \
+printf '%s\n' "# DoubleAWG: форвардинг; rp_filter выключается только на интерфейсах Канала (см. dawg-lib.sh rpf_relax)," \
   "# поэтому общий all = 0, а уровень проверки задается на каждом интерфейсе (default — для новых)" \
-  "net.ipv4.ip_forward = 1" "net.ipv4.conf.all.rp_filter = 0" > /etc/sysctl.d/99-doublevpn.conf
-sysctl -q -p /etc/sysctl.d/99-doublevpn.conf
+  "net.ipv4.ip_forward = 1" "net.ipv4.conf.all.rp_filter = 0" > /etc/sysctl.d/99-doubleawg.conf
+sysctl -q -p /etc/sysctl.d/99-doubleawg.conf
 AFTER
 }
 
@@ -1244,7 +1228,7 @@ write_local_files() {
 
   # ── VPS2 ──
   {
-    echo "# DoubleVPN / AmneziaWG $CH_AWG — выход из Канала (VPS2 ${TARGET[exit]})"
+    echo "# DoubleAWG / AmneziaWG $CH_AWG — выход из Канала (VPS2 ${TARGET[exit]})"
     echo "[Interface]"
     echo "PrivateKey = $OUTWAY_PRIV"
     echo "Address = ${OUTWAY_IP6}/64"
@@ -1252,8 +1236,8 @@ write_local_files() {
     echo "MTU = $CH_MTU"
     echo "Table = off"
     obf_lines
-    echo "PostUp = $AWG_DIR/dvpn-exit.sh channel-up"
-    echo "PostDown = $AWG_DIR/dvpn-exit.sh channel-down"
+    echo "PostUp = $AWG_DIR/dawg-exit.sh channel-up"
+    echo "PostDown = $AWG_DIR/dawg-exit.sh channel-down"
     echo
     echo "[Peer]"
     echo "# $INWAY_IF @ VPS1 (${TARGET[entry]})"
@@ -1262,25 +1246,25 @@ write_local_files() {
     echo "AllowedIPs = ${INWAY_IP6}/128, 0.0.0.0/0"
   } > "$dx/$OUTWAY_IF.conf"
   {
-    echo "# DoubleVPN: параметры выходного узла (deploy-doublevpn.sh v$SCRIPT_VERSION, $(date '+%F %T'))"
-    printf '%s=%q\n' DVPN_ROLE exit OUTWAY_IF "$OUTWAY_IF" WAN_IF "${N_IF4[exit]}" \
+    echo "# DoubleAWG: параметры выходного узла (deploy-doubleawg.sh v$SCRIPT_VERSION, $(date '+%F %T'))"
+    printf '%s=%q\n' DAWG_ROLE exit OUTWAY_IF "$OUTWAY_IF" WAN_IF "${N_IF4[exit]}" \
       OUTWAY_PORT "$OUTWAY_PORT" IPT_IN "$([[ $TRANSPORT == 6 ]] && echo ip6tables || echo iptables)" CHANNEL_AWG "$CH_AWG"
-  } > "$dx/dvpn.env"
-  src_lib         > "$dx/dvpn-lib.sh"
-  src_exit_hooks  > "$dx/dvpn-exit.sh"
-  src_channel_del > "$dx/dvpn-channel-del.sh"
+  } > "$dx/dawg.env"
+  src_lib         > "$dx/dawg-lib.sh"
+  src_exit_hooks  > "$dx/dawg-exit.sh"
+  src_channel_del > "$dx/dawg-channel-del.sh"
 
   # ── VPS1 ──
   {
-    echo "# DoubleVPN / AmneziaWG $CH_AWG — вход в Канал (VPS1 ${TARGET[entry]})"
+    echo "# DoubleAWG / AmneziaWG $CH_AWG — вход в Канал (VPS1 ${TARGET[entry]})"
     echo "[Interface]"
     echo "PrivateKey = $INWAY_PRIV"
     echo "Address = ${INWAY_IP6}/64"
     echo "MTU = $CH_MTU"
     echo "Table = off"
     obf_lines
-    echo "PostUp = $AWG_DIR/dvpn-entry.sh channel-up"
-    echo "PostDown = $AWG_DIR/dvpn-entry.sh channel-down"
+    echo "PostUp = $AWG_DIR/dawg-entry.sh channel-up"
+    echo "PostDown = $AWG_DIR/dawg-entry.sh channel-down"
     echo
     echo "[Peer]"
     echo "# $OUTWAY_IF @ VPS2 (${TARGET[exit]})"
@@ -1291,18 +1275,18 @@ write_local_files() {
     echo "PersistentKeepalive = 25"
   } > "$de/$INWAY_IF.conf"
   {
-    echo "# DoubleVPN: параметры входного узла (deploy-doublevpn.sh v$SCRIPT_VERSION, $(date '+%F %T'))"
-    printf '%s=%q\n' DVPN_ROLE entry INWAY_IF "$INWAY_IF" WAN_IF "${N_IF4[entry]}" PUB4 "${N_PUB4[entry]}" \
+    echo "# DoubleAWG: параметры входного узла (deploy-doubleawg.sh v$SCRIPT_VERSION, $(date '+%F %T'))"
+    printf '%s=%q\n' DAWG_ROLE entry INWAY_IF "$INWAY_IF" WAN_IF "${N_IF4[entry]}" PUB4 "${N_PUB4[entry]}" \
       CHANNEL_AWG "$CH_AWG" INWAY_MTU "$CH_MTU" GATE_PREFIX "$GATE_PREFIX" \
       RT_BASE "$RT_BASE" PEER6 "$OUTWAY_IP6" DEFAULT_DNS "$CLIENT_DNS" DEFAULT_I1 "$USE_I1"
-  } > "$de/dvpn.env"
-  src_lib         > "$de/dvpn-lib.sh"
-  src_entry_hooks > "$de/dvpn-entry.sh"
-  src_gate_add    > "$de/dvpn-gate-add.sh"
-  src_gate_del    > "$de/dvpn-gate-del.sh"
-  src_client_add  > "$de/dvpn-client-add.sh"
-  src_client_del  > "$de/dvpn-client-del.sh"
-  src_channel_del > "$de/dvpn-channel-del.sh"
+  } > "$de/dawg.env"
+  src_lib         > "$de/dawg-lib.sh"
+  src_entry_hooks > "$de/dawg-entry.sh"
+  src_gate_add    > "$de/dawg-gate-add.sh"
+  src_gate_del    > "$de/dawg-gate-del.sh"
+  src_client_add  > "$de/dawg-client-add.sh"
+  src_client_del  > "$de/dawg-client-del.sh"
+  src_channel_del > "$de/dawg-channel-del.sh"
   chmod 600 "$de"/* "$dx"/*
   chmod 700 "$de"/*.sh "$dx"/*.sh
 }
@@ -1314,16 +1298,16 @@ build_bundles() {
     echo '#!/bin/bash'
     printf 'IFACES=%q\n' "$OUTWAY_IF"
     emit_head; emit_cleanup; emit_install
-    emit_file "$AWG_DIR/dvpn-lib.sh"         700 "$OUT/servers/exit/dvpn-lib.sh"
-    emit_file "$AWG_DIR/dvpn.env"            600 "$OUT/servers/exit/dvpn.env"
-    emit_file "$AWG_DIR/dvpn-exit.sh"        700 "$OUT/servers/exit/dvpn-exit.sh"
-    emit_file "$AWG_DIR/dvpn-channel-del.sh" 700 "$OUT/servers/exit/dvpn-channel-del.sh"
+    emit_file "$AWG_DIR/dawg-lib.sh"         700 "$OUT/servers/exit/dawg-lib.sh"
+    emit_file "$AWG_DIR/dawg.env"            600 "$OUT/servers/exit/dawg.env"
+    emit_file "$AWG_DIR/dawg-exit.sh"        700 "$OUT/servers/exit/dawg-exit.sh"
+    emit_file "$AWG_DIR/dawg-channel-del.sh" 700 "$OUT/servers/exit/dawg-channel-del.sh"
     emit_file "$AWG_DIR/$OUTWAY_IF.conf"     600 "$OUT/servers/exit/$OUTWAY_IF.conf"
     emit_after_files
     cat <<'X'
-ufw_dvpn_add "DoubleVPN $OUTWAY_IF " \
-  "allow $OUTWAY_PORT/udp comment 'DoubleVPN $OUTWAY_IF port'" \
-  "route allow in on $OUTWAY_IF out on $WAN_IF comment 'DoubleVPN $OUTWAY_IF internet'"
+ufw_dawg_add "DoubleAWG $OUTWAY_IF " \
+  "allow $OUTWAY_PORT/udp comment 'DoubleAWG $OUTWAY_IF port'" \
+  "route allow in on $OUTWAY_IF out on $WAN_IF comment 'DoubleAWG $OUTWAY_IF internet'"
 if [ "$IPT_IN" = ip6tables ] && command -v ufw >/dev/null 2>&1 && ! grep -qs '^IPV6=yes' /etc/default/ufw; then
   warn "в /etc/default/ufw IPV6 не yes — правило ufw для IPv6-транспорта не применится (поставьте IPV6=yes и ufw reload)"
 fi
@@ -1341,36 +1325,36 @@ X
     printf 'IFACES=%q\nRUNID=%q\nGATE_CONFS=%q\n' "$ifs" "$RUNID" "${confs# }"
     emit_head; emit_cleanup; emit_install
     local f
-    for f in dvpn-lib.sh dvpn-entry.sh dvpn-gate-add.sh dvpn-gate-del.sh dvpn-client-add.sh dvpn-client-del.sh dvpn-channel-del.sh; do
+    for f in dawg-lib.sh dawg-entry.sh dawg-gate-add.sh dawg-gate-del.sh dawg-client-add.sh dawg-client-del.sh dawg-channel-del.sh; do
       emit_file "$AWG_DIR/$f" 700 "$OUT/servers/entry/$f"
     done
-    emit_file "$AWG_DIR/dvpn.env"        600 "$OUT/servers/entry/dvpn.env"
+    emit_file "$AWG_DIR/dawg.env"        600 "$OUT/servers/entry/dawg.env"
     emit_file "$AWG_DIR/$INWAY_IF.conf"  600 "$OUT/servers/entry/$INWAY_IF.conf"
     emit_after_files
     cat <<'X'
 log "Split: файлы списков и таймер обновления"
-if [ ! -e "$D/dvpn-ru-extra.txt" ]; then
+if [ ! -e "$D/dawg-ru-extra.txt" ]; then
   printf '%s\n' "# Свои IPv4-подсети, которые идут НАПРЯМУЮ (как российские). Одна CIDR в строке." \
-                "# После правки: $D/dvpn-entry.sh split-update" > "$D/dvpn-ru-extra.txt"
+                "# После правки: $D/dawg-entry.sh split-update" > "$D/dawg-ru-extra.txt"
 fi
-if [ ! -e "$D/dvpn-ru-exclude.txt" ]; then
+if [ ! -e "$D/dawg-ru-exclude.txt" ]; then
   printf '%s\n' "# IPv4-подсети, которые всегда идут В КАНАЛ, даже если они российские. Одна CIDR в строке." \
-                "# После правки: $D/dvpn-entry.sh split-update" > "$D/dvpn-ru-exclude.txt"
+                "# После правки: $D/dawg-entry.sh split-update" > "$D/dawg-ru-exclude.txt"
 fi
-chmod 600 "$D/dvpn-ru-extra.txt" "$D/dvpn-ru-exclude.txt"
-cat > /etc/systemd/system/dvpn-ru-update.service <<UNIT
+chmod 600 "$D/dawg-ru-extra.txt" "$D/dawg-ru-exclude.txt"
+cat > /etc/systemd/system/dawg-ru-update.service <<UNIT
 [Unit]
-Description=DoubleVPN: update list of Russian IPv4 networks for split routing
+Description=DoubleAWG: update list of Russian IPv4 networks for split routing
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$D/dvpn-entry.sh split-update
+ExecStart=$D/dawg-entry.sh split-update
 UNIT
-cat > /etc/systemd/system/dvpn-ru-update.timer <<'UNIT'
+cat > /etc/systemd/system/dawg-ru-update.timer <<'UNIT'
 [Unit]
-Description=DoubleVPN: weekly update of Russian IPv4 networks
+Description=DoubleAWG: weekly update of Russian IPv4 networks
 
 [Timer]
 OnCalendar=weekly
@@ -1381,9 +1365,9 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 systemctl daemon-reload
-systemctl enable -q --now dvpn-ru-update.timer
+systemctl enable -q --now dawg-ru-update.timer
 log "Загрузка списка российских подсетей"
-"$D/dvpn-entry.sh" split-update || warn "список не загрузился — повторите позже: $D/dvpn-entry.sh split-update"
+"$D/dawg-entry.sh" split-update || warn "список не загрузился — повторите позже: $D/dawg-entry.sh split-update"
 
 start_iface "$INWAY_IF"
 log "Проверка Канала $INWAY_IF -> $PEER6"
@@ -1403,20 +1387,20 @@ fi
 X
     for (( i = 1; i <= NG; i++ )); do
       printf 'log %q\n' "Входной интерфейс ${GATE_PREFIX}$i"
-      printf 'GATE_PRIV=%q "$D/dvpn-gate-add.sh" --num %q --awg %q --mode %q --net %q --port %q --split %q --i1 %q --dns %q --yes\n' \
+      printf 'GATE_PRIV=%q "$D/dawg-gate-add.sh" --num %q --awg %q --mode %q --net %q --port %q --split %q --i1 %q --dns %q --yes\n' \
         "${G_PRIV[i]}" "$i" "${G_AWG[i]}" "${G_MODE[i]}" "${G_NET[i]}" "${G_PORT[i]}" "${G_SPLIT[i]}" "$USE_I1" "$CLIENT_DNS"
       if [[ ${G_MODE[i]} == connect ]]; then
-        printf 'CLIENT_PRIV=%q CLIENT_PSK=%q "$D/dvpn-client-add.sh" %q %q --endpoint %q --quiet\n' \
+        printf 'CLIENT_PRIV=%q CLIENT_PSK=%q "$D/dawg-client-add.sh" %q %q --endpoint %q --quiet\n' \
           "${C_PRIV[i]}" "${C_PSK[i]}" "${GATE_PREFIX}$i" "${G_CLIENT[i]}" "${G_CEP[i]}"
       else
-        printf 'CLIENT_PRIV=%q CLIENT_PSK=%q "$D/dvpn-client-add.sh" %q %q --quiet\n' \
+        printf 'CLIENT_PRIV=%q CLIENT_PSK=%q "$D/dawg-client-add.sh" %q %q --quiet\n' \
           "${C_PRIV[i]}" "${C_PSK[i]}" "${GATE_PREFIX}$i" "${G_CLIENT[i]}"
       fi
     done
     cat <<'X'
-"$D/dvpn-entry.sh" split-status | sed 's/^/    /' || true
+"$D/dawg-entry.sh" split-status | sed 's/^/    /' || true
 awg show | sed 's/^/    /'
-OUTTAR="/tmp/dvpn-out-$RUNID.tar.gz"
+OUTTAR="/tmp/dawg-out-$RUNID.tar.gz"
 # shellcheck disable=SC2086
 ( cd "$D" && tar -czf "$OUTTAR" clients $GATE_CONFS )
 chmod 600 "$OUTTAR"
@@ -1429,7 +1413,7 @@ X
 
 fetch_entry_files() {
   local tgz="$WORK/out.tgz" x="$WORK/x" i g f
-  if ! ssh_cmd entry "cat '/tmp/dvpn-out-$RUNID.tar.gz' && rm -f '/tmp/dvpn-out-$RUNID.tar.gz'" > "$tgz"; then
+  if ! ssh_cmd entry "cat '/tmp/dawg-out-$RUNID.tar.gz' && rm -f '/tmp/dawg-out-$RUNID.tar.gz'" > "$tgz"; then
     warn "Не удалось забрать конфиги с VPS1 — они остались на сервере в $AWG_DIR/clients/"
     return 0
   fi
@@ -1447,11 +1431,11 @@ obf_from_conf() {  # строки обфускации из конфига
 }
 
 write_result() {
-  local f="$OUT/doublevpn-result.txt" tr i g gc cc
+  local f="$OUT/doubleawg-result.txt" tr i g gc cc
   if [[ $TRANSPORT == 6 ]]; then tr="IPv6"; else tr="IPv4"; fi
   {
     echo "######################################################################"
-    echo "#  DoubleVPN на AmneziaWG — результат развертывания"
+    echo "#  DoubleAWG на AmneziaWG — результат развертывания"
     echo "#  Дата: $(date '+%Y-%m-%d %H:%M:%S %z')   скрипт v$SCRIPT_VERSION"
     echo "#  ВНИМАНИЕ: файл содержит приватные ключи. Храните его в безопасном месте."
     echo "######################################################################"
@@ -1502,27 +1486,27 @@ write_result() {
     done
     echo
     echo "=== СКРИПТЫ НА СЕРВЕРАХ ($AWG_DIR, запуск через sudo) ==="
-    echo "VPS1  dvpn-gate-add.sh                         — добавить входной интерфейс (интерактивно или --help)"
-    echo "VPS1  dvpn-gate-del.sh <интерфейс>             — удалить входной интерфейс и его клиентов"
-    echo "VPS1  dvpn-client-add.sh <интерфейс> <имя>     — добавить клиента (конфиг в clients/<интерфейс>/<имя>.conf)"
+    echo "VPS1  dawg-gate-add.sh                         — добавить входной интерфейс (интерактивно или --help)"
+    echo "VPS1  dawg-gate-del.sh <интерфейс>             — удалить входной интерфейс и его клиентов"
+    echo "VPS1  dawg-client-add.sh <интерфейс> <имя>     — добавить клиента (конфиг в clients/<интерфейс>/<имя>.conf)"
     echo "      (для режима connect: --endpoint host:port — где слушает клиент)"
-    echo "VPS1  dvpn-client-del.sh <интерфейс> <имя>     — удалить клиента"
-    echo "VPS1  dvpn-entry.sh split-up|split-down|split-status <интерфейс>, split-update"
-    echo "VPS1  dvpn-channel-del.sh [--purge]            — удалить Канал, все входные интерфейсы, таймер"
-    echo "VPS2  dvpn-channel-del.sh [--purge]            — удалить Канал"
+    echo "VPS1  dawg-client-del.sh <интерфейс> <имя>     — удалить клиента"
+    echo "VPS1  dawg-entry.sh split-up|split-down|split-status <интерфейс>, split-update"
+    echo "VPS1  dawg-channel-del.sh [--purge]            — удалить Канал, все входные интерфейсы, таймер"
+    echo "VPS2  dawg-channel-del.sh [--purge]            — удалить Канал"
     echo "      Ключи новых интерфейсов и клиентов генерирует сервер (awg genkey)."
     echo
     echo "=== SPLIT (VPS1) ==="
     echo "Трафик к российским IPv4 — напрямую через ${N_IF4[entry]} (${N_PUB4[entry]}), остальное — в Канал."
     echo "Включается отдельно для каждого входного интерфейса строками в его .conf:"
-    echo "  PostUp = $AWG_DIR/dvpn-entry.sh split-up <интерфейс>"
-    echo "  PostDown = $AWG_DIR/dvpn-entry.sh split-down <интерфейс>"
+    echo "  PostUp = $AWG_DIR/dawg-entry.sh split-up <интерфейс>"
+    echo "  PostDown = $AWG_DIR/dawg-entry.sh split-down <интерфейс>"
     echo "  и systemctl restart awg-quick@<интерфейс>"
-    echo "Список RU: $AWG_DIR/dvpn-ru.txt (таймер dvpn-ru-update.timer раз в неделю)"
-    echo "Свои напрямую: dvpn-ru-extra.txt; всегда в Канал: dvpn-ru-exclude.txt; затем split-update"
+    echo "Список RU: $AWG_DIR/dawg-ru.txt (таймер dawg-ru-update.timer раз в неделю)"
+    echo "Свои напрямую: dawg-ru-extra.txt; всегда в Канал: dawg-ru-exclude.txt; затем split-update"
     echo
     echo "=== FIREWALL ==="
-    echo "iptables — в PostUp/PostDown (dvpn-entry.sh, dvpn-exit.sh); ufw (если установлен) — правила с пометкой 'DoubleVPN <интерфейс>'."
+    echo "iptables — в PostUp/PostDown (dawg-entry.sh, dawg-exit.sh); ufw (если установлен) — правила с пометкой 'DoubleAWG <интерфейс>'."
     echo "Внешний firewall провайдера не настраивается: откройте UDP $OUTWAY_PORT на VPS2 и порты входных интерфейсов на VPS1."
     echo
     echo "=== ВЕРСИИ AmneziaWG ==="
@@ -1536,9 +1520,9 @@ write_result() {
 
 # ═════════════════════════════════ основной сценарий ═════════════════════════════════
 main() {
-  printf '\n%sDoubleVPN на AmneziaWG (kernel-mode) — развертывание v%s%s\n\n' "$C_B" "$SCRIPT_VERSION" "$C_0" >&2
+  printf '\n%sDoubleAWG на AmneziaWG (kernel-mode) — развертывание v%s%s\n\n' "$C_B" "$SCRIPT_VERSION" "$C_0" >&2
   check_local
-  WORK=$(mktemp -d "${TMPDIR:-/tmp}/dvpn.XXXXXX"); chmod 700 "$WORK"
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/dawg.XXXXXX"); chmod 700 "$WORK"
   trap cleanup EXIT
   trap 'die "Прервано"' INT TERM
   umask 077
@@ -1620,7 +1604,6 @@ main() {
   for r in $(nfo entry ROUTES4); do
     case ${r#*@} in
       "$INWAY_IF"|"$GATE_PREFIX"[0-9]*) continue ;;
-      gate1|door1) [[ $(nfo entry PREV) == v1 ]] && continue ;;
     esac
     sys_nets+="${r%@*} "
   done
@@ -1676,7 +1659,7 @@ main() {
   # ── 7. Генерация ──
   RUNID="$(date +%s)$RANDOM"
   gen_all
-  OUT=${OUT_DIR:-"$PWD/doublevpn-$(date +%Y%m%d-%H%M%S)"}
+  OUT=${OUT_DIR:-"$PWD/doubleawg-$(date +%Y%m%d-%H%M%S)"}
   mkdir -p "$OUT"; chmod 700 "$OUT"
   write_local_files
   write_result
@@ -1718,7 +1701,7 @@ main() {
   for (( i = 1; i <= NG; i++ )); do
     printf '  Клиент %-24s %s\n' "${G_CLIENT[i]}@${GATE_PREFIX}$i:" "$OUT/${GATE_PREFIX}$i-${G_CLIENT[i]}.conf" >&2
   done
-  printf '  Управление на VPS1: sudo %s/dvpn-client-add.sh <интерфейс> <имя>, dvpn-gate-add.sh и др. (см. файл результата)\n' "$AWG_DIR" >&2
+  printf '  Управление на VPS1: sudo %s/dawg-client-add.sh <интерфейс> <имя>, dawg-gate-add.sh и др. (см. файл результата)\n' "$AWG_DIR" >&2
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

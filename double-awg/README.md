@@ -1,8 +1,8 @@
-# DoubleVPN на AmneziaWG
+# DoubleAWG на AmneziaWG
 
 [RUS](README.md) [ENG](README-EN.md)
 
-`deploy-doublevpn.sh` разворачивает каскадный VPN (DoubleVPN) из двух VPS на Ubuntu 24.04 с [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) в режиме модуля ядра. Скрипт запускается на вашей машине (Linux или WSL) и настраивает оба сервера по SSH.
+`deploy-doubleawg.sh` разворачивает каскадный VPN (DoubleAWG) из двух VPS на Ubuntu 24.04 с [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) в режиме модуля ядра. Скрипт запускается на вашей машине (Linux или WSL) и настраивает оба сервера по SSH.
 
 ```
 Клиенты ──IPv4──▶ VPS1 [gate1 … gateN │ inway] ══IPv6══▶ VPS2 [outway] ──IPv4/NAT──▶ Интернет
@@ -26,7 +26,7 @@
   - `connect` — сервер сам подключается к клиенту. Подходит для роутера с белым IP: у клиента в конфиге `ListenPort`, у сервера — `Endpoint` клиента.
 - Подсеть каждого входного интерфейса задаётся независимо (`/8`…`/30`), подсети не обязаны быть смежными. VPS2 подсетей клиентов не знает, поэтому новые входы добавляются без изменений на VPS2.
 - Скрипты управления на серверах: добавить или удалить входной интерфейс, добавить или удалить клиента, удалить Канал.
-- Правила ufw (если он установлен) с пометкой `DoubleVPN`. Миграция с первой версии скрипта (`door1`/`gate1`/`door2`).
+- Правила ufw (если он установлен) с пометкой `DoubleAWG`.
 
 ## Требования
 
@@ -42,14 +42,14 @@
 ## Быстрый старт
 
 ```bash
-chmod +x deploy-doublevpn.sh
-./deploy-doublevpn.sh
+chmod +x deploy-doubleawg.sh
+./deploy-doubleawg.sh
 ```
 
 Значения по умолчанию можно задать заранее: `ENTRY_SSH`, `EXIT_SSH`, `ENTRY_SSH_PORT`, `EXIT_SSH_PORT`, `OUT_DIR`.
 
 ```bash
-ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 ./deploy-doublevpn.sh
+ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 ./deploy-doubleawg.sh
 ```
 
 ### Что спрашивает скрипт
@@ -67,11 +67,11 @@ ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 ./deploy-doublevpn.sh
 
 ### Результат
 
-Создаётся папка `doublevpn-ГГГГММДД-ЧЧММСС/` с правами `700`:
+Создаётся папка `doubleawg-ГГГГММДД-ЧЧММСС/` с правами `700`:
 
 | Файл | Что внутри |
 |---|---|
-| `doublevpn-result.txt` | узлы, адресация, все ключи и параметры обфускации с пометками, команды управления |
+| `doubleawg-result.txt` | узлы, адресация, все ключи и параметры обфускации с пометками, команды управления |
 | `<интерфейс>-<клиент>.conf` | конфиги первых клиентов, например `gate1-client1.conf` |
 | `servers/entry/`, `servers/exit/` | копии конфигов и скриптов, установленных на серверы |
 
@@ -108,27 +108,27 @@ ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 ./deploy-doublevpn.sh
 D=/etc/amnezia/amneziawg
 
 # входной интерфейс: интерактивно или параметрами
-sudo $D/dvpn-gate-add.sh
-sudo $D/dvpn-gate-add.sh --awg 2 --mode listen --net 192.168.181.0/24 --port 40005 --split yes --yes
-sudo $D/dvpn-gate-add.sh --help
-sudo $D/dvpn-gate-del.sh gate2                        # вместе с клиентами
+sudo $D/dawg-gate-add.sh
+sudo $D/dawg-gate-add.sh --awg 2 --mode listen --net 192.168.181.0/24 --port 40005 --split yes --yes
+sudo $D/dawg-gate-add.sh --help
+sudo $D/dawg-gate-del.sh gate2                        # вместе с клиентами
 
 # клиенты
-sudo $D/dvpn-client-add.sh gate1 phone                # listen: выводит конфиг и QR (если есть qrencode)
-sudo $D/dvpn-client-add.sh gate2 router --endpoint home.example.net:51820   # connect
-sudo $D/dvpn-client-del.sh gate1 phone
+sudo $D/dawg-client-add.sh gate1 phone                # listen: выводит конфиг и QR (если есть qrencode)
+sudo $D/dawg-client-add.sh gate2 router --endpoint home.example.net:51820   # connect
+sudo $D/dawg-client-del.sh gate1 phone
 
 # split
-sudo $D/dvpn-entry.sh split-status
-sudo $D/dvpn-entry.sh split-up gate1
-sudo $D/dvpn-entry.sh split-down gate1
-sudo $D/dvpn-entry.sh split-update                    # обновить список российских подсетей
+sudo $D/dawg-entry.sh split-status
+sudo $D/dawg-entry.sh split-up gate1
+sudo $D/dawg-entry.sh split-down gate1
+sudo $D/dawg-entry.sh split-update                    # обновить список российских подсетей
 
 # удалить Канал, все входные интерфейсы и таймер (с --purge — ещё пакеты AmneziaWG и PPA)
-sudo $D/dvpn-channel-del.sh [--purge]
+sudo $D/dawg-channel-del.sh [--purge]
 ```
 
-Параметры `dvpn-gate-add.sh`:
+Параметры `dawg-gate-add.sh`:
 
 | Параметр | Значение |
 |---|---|
@@ -144,7 +144,7 @@ sudo $D/dvpn-channel-del.sh [--purge]
 ### VPS2 (выход)
 
 ```bash
-sudo /etc/amnezia/amneziawg/dvpn-channel-del.sh [--purge]
+sudo /etc/amnezia/amneziawg/dawg-channel-del.sh [--purge]
 ```
 
 ## Split-маршрутизация
@@ -152,14 +152,14 @@ sudo /etc/amnezia/amneziawg/dvpn-channel-del.sh [--purge]
 Split включается и выключается двумя строками в `.conf` входного интерфейса:
 
 ```ini
-PostUp = /etc/amnezia/amneziawg/dvpn-entry.sh split-up gate1
-PostDown = /etc/amnezia/amneziawg/dvpn-entry.sh split-down gate1
+PostUp = /etc/amnezia/amneziawg/dawg-entry.sh split-up gate1
+PostDown = /etc/amnezia/amneziawg/dawg-entry.sh split-down gate1
 ```
 
 Закомментируйте или раскомментируйте обе строки и выполните `sudo systemctl restart awg-quick@gate1`. Без перезапуска — командами `split-up` и `split-down`.
 
-- **Список подсетей.** Российские IPv4-подсети берутся по очереди из статистики RIPE NCC (delegated stats), RIPEstat и ipdeny и объединяются. Список хранится в `dvpn-ru.txt` и обновляется таймером `dvpn-ru-update.timer` раз в неделю.
-- **Свои исключения.** В `dvpn-ru-extra.txt` — подсети, которые идут напрямую. В `dvpn-ru-exclude.txt` — подсети, которые всегда идут в Канал. После правки выполните `split-update`.
+- **Список подсетей.** Российские IPv4-подсети берутся по очереди из статистики RIPE NCC (delegated stats), RIPEstat и ipdeny и объединяются. Список хранится в `dawg-ru.txt` и обновляется таймером `dawg-ru-update.timer` раз в неделю.
+- **Свои исключения.** В `dawg-ru-extra.txt` — подсети, которые идут напрямую. В `dawg-ru-exclude.txt` — подсети, которые всегда идут в Канал. После правки выполните `split-update`.
 - **Точность.** Список основан на стране регистрации подсети, а не на реальном расположении адресов.
 - **DNS.** С DNS `1.1.1.1` запросы идут через Канал, и российские сайты с CDN могут отдавать зарубежные адреса. С российским DNS (например, `77.88.8.8`) они пойдут напрямую, но сами DNS-запросы будут видны в России.
 
@@ -177,7 +177,7 @@ PostDown = /etc/amnezia/amneziawg/dvpn-entry.sh split-down gate1
 **VPS1:**
 - У каждого входного интерфейса `gateN` своя таблица маршрутизации `7100+N` (правила `ip rule` 31000/31001). В таблице `default dev inway`, а при недоступном Канале — `blackhole` (kill-switch).
 - Split добавляет в эту таблицу `throw`-маршруты для российских подсетей, плюс NAT через внешний интерфейс.
-- Правила firewall для интерфейса ставятся в `PostUp` и снимаются в `PostDown` (`dvpn-entry.sh`).
+- Правила firewall для интерфейса ставятся в `PostUp` и снимаются в `PostDown` (`dawg-entry.sh`).
 
 **VPS2:**
 - Соединения, пришедшие из `outway`, помечаются (`CONNMARK 0x444e0000/0xffff0000`). NAT делается по метке.
@@ -185,22 +185,22 @@ PostDown = /etc/amnezia/amneziawg/dvpn-entry.sh split-down gate1
 
 **rp_filter.** У интерфейсов Канала нет IPv4-адреса, поэтому проверка обратного пути (`rp_filter`) на них выключена. Общее значение `all` опускается до 0, а остальные интерфейсы сохраняют прежний уровень проверки. Отбор источников на интерфейсах Канала делает сам AmneziaWG через `AllowedIPs`.
 
-**Firewall.** Правила iptables ставятся из `PostUp`/`PostDown`. Если установлен ufw, добавляются его правила с пометкой `DoubleVPN <интерфейс>`. ufw скрипт не включает и не выключает. **Внешний firewall в панели провайдера** нужно настроить вручную: открыть UDP-порт `outway` на VPS2 и порты входных интерфейсов на VPS1.
+**Firewall.** Правила iptables ставятся из `PostUp`/`PostDown`. Если установлен ufw, добавляются его правила с пометкой `DoubleAWG <интерфейс>`. ufw скрипт не включает и не выключает. **Внешний firewall в панели провайдера** нужно настроить вручную: открыть UDP-порт `outway` на VPS2 и порты входных интерфейсов на VPS1.
 
 ## Удаление и переустановка
 
 ```bash
-sudo /etc/amnezia/amneziawg/dvpn-channel-del.sh --purge   # сначала VPS1
-sudo /etc/amnezia/amneziawg/dvpn-channel-del.sh --purge   # затем VPS2
+sudo /etc/amnezia/amneziawg/dawg-channel-del.sh --purge   # сначала VPS1
+sudo /etc/amnezia/amneziawg/dawg-channel-del.sh --purge   # затем VPS2
 ```
 
-`net.ipv4.ip_forward` остаётся включённым до перезагрузки. Повторный запуск `deploy-doublevpn.sh` сам находит и удаляет предыдущую установку на узлах, но с ней удаляются и все клиенты, а ключи создаются новые. Установка первой версии скрипта переводится автоматически, её конфиги сохраняются как `*.v1-bak`.
+`net.ipv4.ip_forward` остаётся включённым до перезагрузки. Повторный запуск `deploy-doubleawg.sh` сам находит и удаляет предыдущую установку на узлах, но с ней удаляются и все клиенты, а ключи создаются новые.
 
 ## Диагностика
 
 ```bash
 sudo awg show                                   # рукопожатия и счётчики
-sudo /etc/amnezia/amneziawg/dvpn-entry.sh split-status                 # VPS1
+sudo /etc/amnezia/amneziawg/dawg-entry.sh split-status                 # VPS1
 ip rule; ip route show table 7101 | grep -v throw
 sudo iptables -vnL FORWARD | head -20
 sudo tcpdump -ni gate1 -c 20                    # что приходит от клиентов
