@@ -1,0 +1,18 @@
+.*/
+!.github/
+
+.*
+!.git*
+!.*.yaml
+
+# backups
+*.bak
+*.bak.*
+*.copy
+*.copy.*
+
+/*.md
+!README*.md
+
+tmp/
+
