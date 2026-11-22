@@ -42,14 +42,21 @@ Clients ──IPv4──▶ VPS1 [gate1 … gateN │ inway] ══IPv6══▶
 ## Quick start
 
 ```bash
-chmod +x deploy-doubleawg.sh
-./deploy-doubleawg.sh
+curl -fsSL https://raw.githubusercontent.com/dv-proj/asher/main/double-awg/deploy-doubleawg.sh | bash
+```
+
+The script needs bash, so run it with `bash`, not `sh`. It asks its questions through the terminal, so piping works. To read it before running, download it first:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/dv-proj/asher/main/double-awg/deploy-doubleawg.sh
+bash deploy-doubleawg.sh
 ```
 
 You can preset the defaults with `ENTRY_SSH`, `EXIT_SSH`, `ENTRY_SSH_PORT`, `EXIT_SSH_PORT` and `OUT_DIR`:
 
 ```bash
-ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 ./deploy-doubleawg.sh
+ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/dv-proj/asher/main/double-awg/deploy-doubleawg.sh)"
 ```
 
 ### What the script asks

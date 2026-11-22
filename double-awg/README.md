@@ -42,14 +42,21 @@
 ## Быстрый старт
 
 ```bash
-chmod +x deploy-doubleawg.sh
-./deploy-doubleawg.sh
+curl -fsSL https://raw.githubusercontent.com/dv-proj/asher/main/double-awg/deploy-doubleawg.sh | bash
+```
+
+Скрипту нужен bash, поэтому запускайте через `bash`, а не `sh`. Вопросы он задаёт через терминал, так что запуск через конвейер работает. Если хотите сначала прочитать скрипт, скачайте его и запустите:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/dv-proj/asher/main/double-awg/deploy-doubleawg.sh
+bash deploy-doubleawg.sh
 ```
 
 Значения по умолчанию можно задать заранее: `ENTRY_SSH`, `EXIT_SSH`, `ENTRY_SSH_PORT`, `EXIT_SSH_PORT`, `OUT_DIR`.
 
 ```bash
-ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 ./deploy-doubleawg.sh
+ENTRY_SSH=root@203.0.113.10 EXIT_SSH=root@198.51.100.20 \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/dv-proj/asher/main/double-awg/deploy-doubleawg.sh)"
 ```
 
 ### Что спрашивает скрипт
