@@ -8,6 +8,7 @@
 
 | Папка | Описание |
 |---|---|
+| [do-first](do-first/README.md) | **do-first** — первичная настройка свежего Ubuntu/Debian VPS: обновление, пользователь и SSH-ключ, защита SSH, ufw, fail2ban, автообновления, swap, журналы, Docker (по желанию). Продолжает работу после перезагрузки. |
 | [double-awg](double-awg/README.md) | **DoubleAWG** — каскадный VPN из двух VPS на [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) (модуль ядра). Клиенты подключаются к первому серверу, трафик идёт через IPv6-канал на второй и выходит в интернет с него. Есть kill-switch и split-маршрутизация для российских IP. Скрипт запускается на вашей машине и настраивает оба сервера по SSH. |
 
 ### double-awg: быстрый запуск

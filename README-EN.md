@@ -8,6 +8,7 @@ A collection of ready-made shell scripts for quickly setting up and deploying en
 
 | Folder | Description |
 |---|---|
+| [do-first](do-first/README-EN.md) | **do-first** — first-time setup of a fresh Ubuntu/Debian VPS: updates, user and SSH key, SSH hardening, ufw, fail2ban, automatic updates, swap, logs, optional Docker. Resumes after a reboot. |
 | [double-awg](double-awg/README-EN.md) | **DoubleAWG** — a cascaded VPN across two VPS using [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/) (kernel module). Clients connect to the first server, traffic goes through an IPv6 tunnel to the second one and leaves to the internet from there. It has a kill-switch and split routing for Russian IPs. The script runs on your machine and configures both servers over SSH. |
 
 ### double-awg: quick start
