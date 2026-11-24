@@ -11,6 +11,9 @@
 #     подключаются к серверу, connect — сервер сам подключается к клиенту (у клиента ListenPort).
 #   * VPS2 подсети клиентов не знает: соединения из Канала помечаются, NAT и возврат ответов — по метке,
 #     поэтому новые входные интерфейсы на VPS1 добавляются без изменений на VPS2.
+#   * Один выходной VPS2 может обслуживать несколько входных VPS1: у каждого свой outway-интерфейс
+#     (outway, outway2, ...) со своим номером, портом и ULA-подсетью Канала. Если на VPS2 уже есть
+#     outway, скрипт спросит: заменить его или добавить новый (EXIT_ACTION=replace|add, EXIT_OUTWAY=имя).
 #   * Версии AmneziaWG: 1 (1.0), 1.5, 2 (2.0), 3 (3.0), 3.1 — отдельно для Канала и каждого входа.
 #   * Kill-switch: трафик клиентов уходит только в Канал; если Канал лежит — блокируется.
 #   * Split (по желанию, отдельно для каждого входного интерфейса, переключается строками в его .conf):
@@ -19,11 +22,12 @@
 #
 # На серверах рядом с конфигами (/etc/amnezia/amneziawg) остаются скрипты управления:
 #   VPS1: dawg-gate-add.sh, dawg-gate-del.sh, dawg-client-add.sh, dawg-client-del.sh, dawg-channel-del.sh
-#   VPS2: dawg-channel-del.sh
+#   VPS2: dawg-exit.sh, dawg-channel-del.sh [<outway>]; состояние интерфейсов — outway.d/<имя>.env
 #
 # Машина запуска: Linux/WSL, bash 4.4+, ssh (доступ к VPS по ключу), wireguard-tools (wg), tar.
 # VPS: Ubuntu 24.04, KVM/выделенный сервер (не OpenVZ/LXC), root или sudo.
-# Необязательные переменные окружения: ENTRY_SSH, EXIT_SSH, ENTRY_SSH_PORT, EXIT_SSH_PORT, OUT_DIR
+# Необязательные переменные окружения: ENTRY_SSH, EXIT_SSH, ENTRY_SSH_PORT, EXIT_SSH_PORT, OUT_DIR,
+#   EXIT_ACTION (replace|add — действие, если на VPS2 уже есть outway), EXIT_OUTWAY (имя заменяемого/нового outway)
 #
 set -Eeuo pipefail
 
@@ -264,8 +268,34 @@ check_local() {
   done
 }
 
+# Скрипт (sh, от root) для чтения состояния DoubleAWG на узле: PREV и список outway-интерфейсов.
+# OUTWAYS="имя:номер:порт:ula ...", ula — первые 4 группы ULA /64 Канала из Address конфига.
+outways_chk_sh() {
+  cat <<'CHK'
+D=/etc/amnezia/amneziawg
+if [ -f "$D/dawg.env" ]; then echo PREV=v2; else echo PREV=none; fi
+ow=""
+ula() { sed -n 's/^Address[[:space:]]*=[[:space:]]*\([0-9A-Fa-f]*:[0-9A-Fa-f]*:[0-9A-Fa-f]*:[0-9A-Fa-f]*\):.*/\1/p' "$1" 2>/dev/null | head -n1 | tr 'A-F' 'a-f'; }
+for f in "$D"/outway.d/*.env; do
+  [ -f "$f" ] || continue
+  n=${f##*/}; n=${n%.env}
+  r=$( . "$f" 2>/dev/null; echo "${OUTWAY_NUM:-0}:${OUTWAY_PORT:-}" )
+  ow="$ow$n:${r%%:*}:${r#*:}:$(ula "$D/$n.conf") "
+done
+if [ -f "$D/dawg.env" ]; then
+  r=$( . "$D/dawg.env" 2>/dev/null; echo "${OUTWAY_IF:-}:${OUTWAY_PORT:-}" )
+  n=${r%%:*}
+  if [ -n "$n" ] && [ -f "$D/$n.conf" ] && [ ! -f "$D/outway.d/$n.env" ]; then
+    ow="$ow$n:0:${r#*:}:$(ula "$D/$n.conf") "
+  fi
+fi
+echo "OUTWAYS=${ow% }"
+CHK
+}
+
 write_probe() {
-  cat > "$WORK/probe.sh" <<'PROBE'
+  {
+    cat <<'PROBE'
 export LC_ALL=C
 . /etc/os-release 2>/dev/null
 echo "OS_ID=${ID:-unknown}"
@@ -293,17 +323,24 @@ pub=$( { curl -4 -fsS --max-time 6 https://api.ipify.org || curl -4 -fsS --max-t
 echo "PUB4=$pub"
 echo "MOD_VER=$(modinfo -F version amneziawg 2>/dev/null)"
 echo "LINKS=$(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
-echo "ROUTES4=$(ip -4 route show table main 2>/dev/null | awk '$1 != "default" { n = ""; d = "-"; for (i = 1; i <= NF; i++) { if (n == "" && $i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) n = $i; if ($i == "dev") d = $(i + 1) } if (n != "") { if (n !~ /\//) n = n "/32"; print n "@" d } }' | tr '\n' ' ')"h=$(apt-cache policy "linux-headers-$(uname -r)" 2>/dev/null | awk '/Candidate:/ {print $2}')
+echo "UDPPORTS=$(ss -Hlun 2>/dev/null | awk '{n = split($4, a, ":"); if (a[n] ~ /^[0-9]+$/) print a[n]}' | sort -un | tr '\n' ' ')"
+echo "ROUTES4=$(ip -4 route show table main 2>/dev/null | awk '$1 != "default" { n = ""; d = "-"; for (i = 1; i <= NF; i++) { if (n == "" && $i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) n = $i; if ($i == "dev") d = $(i + 1) } if (n != "") { if (n !~ /\//) n = n "/32"; print n "@" d } }' | tr '\n' ' ')"
+h=$(apt-cache policy "linux-headers-$(uname -r)" 2>/dev/null | awk '/Candidate:/ {print $2}')
 echo "HEADERS=${h:-none}"
 if [ -f /var/run/reboot-required ]; then echo "REBOOT=yes"; else echo "REBOOT=no"; fi
-chk='D=/etc/amnezia/amneziawg; if [ -f $D/dawg.env ]; then echo v2; else echo none; fi'
+read -r -d '' chk <<'__CHK__' || true
+PROBE
+    outways_chk_sh
+    cat <<'PROBE'
+__CHK__
 case $s in
   root) p=$(sh -c "$chk") ;;
   nopasswd) p=$(sudo -n sh -c "$chk") ;;
-  *) p=unknown ;;
+  *) p="PREV=unknown" ;;
 esac
-echo "PREV=$p"
+printf '%s\n' "$p"
 PROBE
+  } > "$WORK/probe.sh"
 }
 
 probe_node() {
@@ -313,7 +350,7 @@ probe_node() {
   out=$(ssh_cmd "$n" 'bash -s' < "$WORK/probe.sh") || die "Не удалось опросить ${TARGET[$n]}"
   while IFS='=' read -r k v; do
     case $k in
-      OS_ID|OS_VER|OS_NAME|KERNEL|VIRT|SUDO|IF4|IP4|MTU4|IF6|IP6|MTU6|PUB4|MOD_VER|LINKS|ROUTES4|HEADERS|REBOOT|PREV)
+      OS_ID|OS_VER|OS_NAME|KERNEL|VIRT|SUDO|IF4|IP4|MTU4|IF6|IP6|MTU6|PUB4|MOD_VER|LINKS|UDPPORTS|ROUTES4|HEADERS|REBOOT|PREV|OUTWAYS)
         INFO["$n.$k"]=$v ;;
     esac
   done <<< "$out"
@@ -342,10 +379,22 @@ check_node() {
   if [[ $(nfo "$n" REBOOT) == yes ]]; then
     warn "$label: система ждет перезагрузки (/var/run/reboot-required); при необходимости скрипт предложит перезагрузить VPS."
   fi
-  case $(nfo "$n" PREV) in
-    v2) warn "$label: найдена предыдущая установка DoubleAWG — она будет полностью удалена (вместе с клиентами)."
-        confirm "Удалить и установить заново?" N || exit 1 ;;
-  esac
+  # на VPS2 существующие outway-интерфейсы не удаляются: действие выбирает choose_exit_action
+  if [[ $n == entry && $(nfo "$n" PREV) == v2 ]]; then
+    warn "$label: найдена предыдущая установка DoubleAWG — она будет полностью удалена (вместе с клиентами)."
+    confirm "Удалить и установить заново?" N || exit 1
+  fi
+}
+
+fetch_prev_sudo() {  # fetch_prev_sudo NODE — состояние DoubleAWG через sudo с паролем (проба без пароля его не прочитала)
+  local n=$1 out k v
+  [[ $(nfo "$n" PREV) == unknown && ${SUDO_MODE[$n]-} == passwd ]] || return 0
+  info "Чтение состояния DoubleAWG на ${TARGET[$n]} (потребуется пароль sudo; следующие строки служебные)..."
+  outways_chk_sh > "$WORK/chk.sh"
+  run_root "$n" "$WORK/chk.sh" 2>&1 | tr -d '\r' | tee "$WORK/chk.out" >&2 || true
+  while IFS='=' read -r k v; do
+    case $k in PREV|OUTWAYS) INFO["$n.$k"]=$v ;; esac
+  done < "$WORK/chk.out"
 }
 
 confirm_node() {
@@ -394,6 +443,148 @@ ask_awg_version() {  # ask_awg_version VAR "вопрос" ПО_УМОЛЧАНИ�
   printf -v "$__v" '%s' "$__a"
 }
 
+# ═════════════ выходной узел: имеющиеся outway-интерфейсы и выбор действия ═════════════
+# INFO[exit.OUTWAYS] = "имя:номер:порт:ula ..." (ula — первые 4 группы ULA /64 Канала, например fd3a:5b7c:9d01:1).
+# Результат choose_exit_action: EXIT_ACTION (new|replace|add), OUTWAY_IF, OUTWAY_NUM, EXIT_OLD_PORT
+# (порт заменяемого интерфейса, иначе пусто), EXIT_REPLACED (имя заменяемого, иначе пусто).
+exit_outway_names() {  # имена найденных outway-интерфейсов, по одному в строке
+  local e
+  for e in $(nfo exit OUTWAYS); do printf '%s\n' "${e%%:*}"; done
+}
+exit_outway_get() {  # exit_outway_get ИМЯ num|port|ula — поле найденного outway-интерфейса (код 1, если его нет)
+  local e nm num port ula
+  for e in $(nfo exit OUTWAYS); do
+    IFS=: read -r nm num port ula <<< "$e"
+    [[ $nm == "$1" ]] || continue
+    case $2 in num) echo "$num" ;; port) echo "$port" ;; ula) echo "$ula" ;; esac
+    return 0
+  done
+  return 1
+}
+exit_outway_ulas() {  # ULA-префиксы найденных outway-интерфейсов (кроме $1 — заменяемого), через пробел
+  local e nm num port ula out=""
+  for e in $(nfo exit OUTWAYS); do
+    IFS=: read -r nm num port ula <<< "$e"
+    [[ $nm != "${1-}" && -n $ula ]] && out+="${ula,,} "
+  done
+  printf '%s' "$out"
+}
+free_outway_name() {  # первое свободное имя outway2, outway3, ... (нет ни в реестре, ни среди интерфейсов узла)
+  local i nm
+  for (( i = 2; i < 100; i++ )); do
+    nm="outway$i"
+    if ! exit_outway_get "$nm" num >/dev/null && ! link_on_node exit "$nm"; then echo "$nm"; return 0; fi
+  done
+  return 1
+}
+free_outway_num() {  # наименьший свободный номер интерфейса (0..99)
+  local i e used=" "
+  for e in $(nfo exit OUTWAYS); do e=${e#*:}; used+="${e%%:*} "; done
+  for (( i = 0; i < 100; i++ )); do
+    if [[ $used != *" $i "* ]]; then echo "$i"; return 0; fi
+  done
+  return 1
+}
+exit_ports_used() {  # занятые UDP-порты на VPS2: порты outway-интерфейсов и любые слушающие сокеты
+  local e used
+  used=$(nfo exit UDPPORTS)
+  for e in $(nfo exit OUTWAYS); do e=${e#*:}; e=${e#*:}; used+=" ${e%%:*}"; done
+  printf '%s' "$used"
+}
+free_udp_port() {  # free_udp_port "занятые порты через пробел" — случайный свободный порт 20000..60999
+  local p used=" $1 "
+  p=$(rnd 20000 60999)
+  while [[ $used == *" $p "* ]]; do p=$(rnd 20000 60999); done
+  echo "$p"
+}
+gen_ula() {  # gen_ula "занятые префиксы" — ULA_NET вида fdXX:XXXX:XXXX:1, не совпадающий с занятыми
+  local b used=" ${1-} "
+  while :; do
+    b=$(hexbytes 5)
+    ULA_NET="fd${b:0:2}:${b:2:4}:${b:6:4}:1"
+    [[ $used != *" $ULA_NET "* ]] && break
+  done
+}
+
+choose_exit_action() {
+  local names=() nm i sel n act=${EXIT_ACTION-} want=${EXIT_OUTWAY-} def
+  EXIT_OLD_PORT=""; EXIT_REPLACED=""
+  mapfile -t names < <(exit_outway_names)
+  if (( ${#names[@]} == 0 )); then
+    case $act in
+      ""|new) ;;
+      *) warn "EXIT_ACTION=$act: на VPS2 нет outway-интерфейсов DoubleAWG — выполняется новая установка" ;;
+    esac
+    EXIT_ACTION=new; OUTWAY_NUM=0
+    if [[ $(nfo exit PREV) == v2 ]]; then
+      warn "На VPS2 есть файлы DoubleAWG без outway-интерфейсов — они будут перезаписаны."
+    fi
+    ask OUTWAY_IF "Выход из Канала на VPS2" "${want:-outway}"
+    valid_ifname "$OUTWAY_IF" || die "Имя '$OUTWAY_IF': до 15 символов, латиница, цифры, _ = + . -"
+    if link_on_node exit "$OUTWAY_IF"; then
+      warn "На VPS2 уже есть интерфейс $OUTWAY_IF — он будет остановлен и перезаписан."
+      confirm "Продолжить?" N || exit 1
+    fi
+    return 0
+  fi
+
+  printf '\n%sНа VPS2 уже есть outway-интерфейсы DoubleAWG:%s\n' "$C_B" "$C_0" >&2
+  for nm in "${names[@]}"; do
+    printf '  %-16s номер %s, UDP-порт %s\n' "$nm" "$(exit_outway_get "$nm" num)" "$(exit_outway_get "$nm" port)" >&2
+  done
+  case $act in
+    "") ;;
+    replace|add) ;;
+    *) die "EXIT_ACTION: допустимо replace или add (на VPS2 уже есть outway-интерфейсы), получено '$act'" ;;
+  esac
+  if [[ -z $act ]]; then
+    printf '  1) Заменить (перенастроить) найденный outway-интерфейс\n' >&2
+    printf '  2) Добавить новый outway-интерфейс (для еще одного входного VPS1)\n' >&2
+    while :; do
+      ask sel "Что сделать?" "2"
+      case $sel in 1) act=replace; break ;; 2) act=add; break ;; esac
+      warn "Введите 1 или 2"
+    done
+  fi
+  EXIT_ACTION=$act
+
+  if [[ $act == replace ]]; then
+    if [[ -n $want ]]; then
+      exit_outway_get "$want" num >/dev/null || die "EXIT_OUTWAY: интерфейса '$want' нет среди outway на VPS2 (${names[*]})"
+      sel=$want
+    elif (( ${#names[@]} == 1 )); then
+      sel=${names[0]}
+    else
+      for i in "${!names[@]}"; do
+        nm=${names[i]}
+        printf '  %d) %s (номер %s, порт %s)\n' "$(( i + 1 ))" "$nm" "$(exit_outway_get "$nm" num)" "$(exit_outway_get "$nm" port)" >&2
+      done
+      while :; do
+        ask n "Какой интерфейс заменить (номер в списке)" "1"
+        [[ $n =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#names[@]} )) && break
+        warn "Введите число от 1 до ${#names[@]}"
+      done
+      sel=${names[n-1]}
+    fi
+    OUTWAY_IF=$sel; OUTWAY_NUM=$(exit_outway_get "$sel" num); EXIT_OLD_PORT=$(exit_outway_get "$sel" port); EXIT_REPLACED=$sel
+    warn "Интерфейс $OUTWAY_IF (номер $OUTWAY_NUM, порт $EXIT_OLD_PORT) будет остановлен и создан заново с новыми ключами."
+    warn "Входной VPS1, подключенный сейчас к нему, потеряет Канал, пока на нем не будет установлен новый (этим запуском или повторным)."
+    confirm "Заменить $OUTWAY_IF?" N || exit 1
+  else
+    def=${want:-$(free_outway_name)}
+    while :; do
+      ask OUTWAY_IF "Имя нового outway-интерфейса на VPS2" "$def"
+      if ! valid_ifname "$OUTWAY_IF"; then warn "Имя: до 15 символов, латиница, цифры, _ = + . -"
+      elif exit_outway_get "$OUTWAY_IF" num >/dev/null; then warn "Интерфейс $OUTWAY_IF уже есть среди outway на VPS2"
+      elif link_on_node exit "$OUTWAY_IF"; then warn "На VPS2 уже есть сетевой интерфейс $OUTWAY_IF"
+      else break; fi
+      [[ -z $want ]] || die "EXIT_OUTWAY: имя '$want' недопустимо или занято"
+      def=$(free_outway_name)
+    done
+    OUTWAY_NUM=$(free_outway_num) || die "На VPS2 исчерпаны номера outway-интерфейсов (0..99)"
+    info "Новый интерфейс: $OUTWAY_IF, номер $OUTWAY_NUM; существующие интерфейсы остаются без изменений."
+  fi
+}
 # ═════════════════════════ скрипты, которые остаются на серверах ═════════════════════════
 src_lib() {
   cat <<'LIB'
@@ -402,6 +593,10 @@ src_lib() {
 D=${DAWG_DIR:-/etc/amnezia/amneziawg}
 KEYGEN="awg genkey"
 if [ -f "$D/dawg.env" ]; then . "$D/dawg.env"; fi
+# Старая установка VPS2 (один outway) хранила параметры интерфейса прямо в dawg.env — запоминаем их
+# отдельно: outway_load перезаписывает OUTWAY_* значениями выбранного интерфейса.
+LEGACY_OUTWAY_IF=${OUTWAY_IF:-}; LEGACY_OUTWAY_PORT=${OUTWAY_PORT:-}; LEGACY_CHANNEL_AWG=${CHANNEL_AWG:-}
+SHARED_IPT_IN=${IPT_IN:-iptables}
 OBF_KEYS='Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4|I1|I2|I3|I4|I5|HeaderProtectionKey|ContentPaddingAddition|RandomTrailers|DisableCookies|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts'
 
 _clr() { if [ -t 2 ]; then printf '\033[%sm' "$1"; fi; }
@@ -441,11 +636,48 @@ gates_all() {
     f=${f##*/}; echo "${f%.env}"
   done
 }
+# Реестр outway-интерфейсов VPS2: по файлу $D/outway.d/<имя>.env на интерфейс (OUTWAY_IF, OUTWAY_NUM,
+# OUTWAY_PORT, CHANNEL_AWG, IPT_IN). Старая установка (OUTWAY_IF в dawg.env, каталога outway.d нет) —
+# интерфейс №0. Номер N задает метку 0x444e000N, таблицу 7100+N и приоритет правила 31000+N.
+outway_list() {  # имена outway-интерфейсов (реестр, затем старая установка), по одному в строке
+  local f n
+  for f in "$D"/outway.d/*.env; do
+    [ -e "$f" ] || continue
+    n=${f##*/}; echo "${n%.env}"
+  done
+  if [ -n "$LEGACY_OUTWAY_IF" ] && [ ! -e "$D/outway.d/$LEGACY_OUTWAY_IF.env" ] && [ -f "$D/$LEGACY_OUTWAY_IF.conf" ]; then
+    echo "$LEGACY_OUTWAY_IF"
+  fi
+}
+outway_load() {  # outway_load ИМЯ — параметры интерфейса в OUTWAY_IF OUTWAY_NUM OUTWAY_PORT CHANNEL_AWG IPT_IN
+  local n=${1-}
+  valid_ifname "$n" || return 1
+  OUTWAY_NUM=0; OUTWAY_PORT=""; CHANNEL_AWG=""; IPT_IN=$SHARED_IPT_IN
+  if [ -f "$D/outway.d/$n.env" ]; then
+    . "$D/outway.d/$n.env"
+  elif [ "$n" = "$LEGACY_OUTWAY_IF" ]; then
+    OUTWAY_PORT=$LEGACY_OUTWAY_PORT; CHANNEL_AWG=$LEGACY_CHANNEL_AWG
+  else
+    return 1
+  fi
+  OUTWAY_IF=$n
+  case $OUTWAY_NUM in ''|*[!0-9]*) return 1 ;; esac
+  OUTWAY_NUM=$(( 10#$OUTWAY_NUM ))
+  [ "$OUTWAY_NUM" -le 99 ]
+}
+outway_default() {  # имя интерфейса №0 — для PostUp/PostDown старых конфигов, вызывающих хук без имени
+  local n
+  if [ -n "$LEGACY_OUTWAY_IF" ] && outway_load "$LEGACY_OUTWAY_IF"; then echo "$LEGACY_OUTWAY_IF"; return 0; fi
+  for n in $(outway_list); do
+    if outway_load "$n" && [ "$OUTWAY_NUM" -eq 0 ]; then echo "$n"; return 0; fi
+  done
+  return 1
+}
 ipt() {  # ipt add|del БИНАРЬ ТАБЛИЦА ЦЕПОЧКА правило...
   local op=$1 bin=$2 tbl=$3 chain=$4; shift 4
   case $op in
-    add) "$bin" -t "$tbl" -C "$chain" "$@" 2>/dev/null || "$bin" -t "$tbl" -I "$chain" "$@" ;;
-    del) while "$bin" -t "$tbl" -C "$chain" "$@" 2>/dev/null; do "$bin" -t "$tbl" -D "$chain" "$@"; done ;;
+    add) "$bin" -w -t "$tbl" -C "$chain" "$@" 2>/dev/null || "$bin" -w -t "$tbl" -I "$chain" "$@" ;;
+    del) while "$bin" -w -t "$tbl" -C "$chain" "$@" 2>/dev/null; do "$bin" -w -t "$tbl" -D "$chain" "$@"; done ;;
   esac
 }
 ufw_dawg_del() {  # ufw_dawg_del МЕТКА — удалить правила ufw, comment которых начинается с МЕТКИ
@@ -459,7 +691,7 @@ ufw_dawg_del() {  # ufw_dawg_del МЕТКА — удалить правила uf
     ufw show added 2>/dev/null | grep -F "'$tag" | while IFS= read -r l; do
       l=${l#ufw }; l=${l% comment *}
       eval "ufw delete $l" >/dev/null 2>&1 || true
-    done
+    done || true   # grep без совпадений (pipefail) не должен прерывать вызывающий скрипт с set -e
   fi
 }
 ufw_dawg_add() {  # ufw_dawg_add МЕТКА "правило" ... — правила ufw (старые с той же меткой удаляются)
@@ -485,12 +717,16 @@ awg_check_conf() {  # awg_check_conf CONF — принимают ли модул
 # интернета); ядро отбрасывает такие пакеты даже при rp_filter=2 ("Invalid cross-device link").
 # Действующее значение = max(all, интерфейс), поэтому all опускается до 0, а остальным интерфейсам
 # (и default — для будущих) выставляется не меньше прежнего all, чтобы их защита не ослабла.
-rpf_protect() {  # опустить all до 0, сохранив действующий уровень на всех интерфейсах (кроме $1)
-  local base=${RPF_DIR:-/proc/sys/net/ipv4/conf} all f v
+rpf_protect() {  # опустить all до 0, сохранив действующий уровень на всех интерфейсах (кроме $1 и интерфейсов Канала)
+  local base=${RPF_DIR:-/proc/sys/net/ipv4/conf} all f v skip
   all=$(cat "$base/all/rp_filter" 2>/dev/null || echo 0)
   [ "$all" != 0 ] || return 0
+  # интерфейсы Канала (все outway на VPS2, inway на VPS1) должны остаться с rp_filter=0, иначе их трафик отбрасывается
+  skip=" $(outway_list 2>/dev/null | tr '\n' ' ') ${INWAY_IF:-} ${1:-} "
   for f in "$base"/*/rp_filter; do
-    case $f in "$base/all/rp_filter"|"$base/${1:-}/rp_filter") continue ;; esac
+    case $f in "$base/all/rp_filter") continue ;; esac
+    v=${f%/rp_filter}; v=${v##*/}
+    case $skip in *" $v "*) continue ;; esac
     v=$(cat "$f" 2>/dev/null || echo 0)
     if [ "$v" -lt "$all" ]; then echo "$all" > "$f" 2>/dev/null || true; fi
   done
@@ -672,48 +908,71 @@ HOOKS
 src_exit_hooks() {
   cat <<'HOOKS'
 #!/bin/bash
-# DoubleAWG: правила выходного узла (VPS2). Вызывается из PostUp/PostDown интерфейса Канала:
-#   channel-up | channel-down
+# DoubleAWG: правила выходного узла (VPS2) для ОДНОГО outway-интерфейса. Вызывается из PostUp/PostDown
+# его конфига:
+#   dawg-exit.sh channel-up|channel-down <интерфейс>
+# Параметры интерфейса берутся из $D/outway.d/<интерфейс>.env (см. outway_load в dawg-lib.sh).
+# Без имени интерфейса (конфиги старой установки) используется интерфейс №0.
 #
 # Подсети клиентов VPS2 не знает: соединения, пришедшие из Канала, помечаются (CONNMARK),
 # по метке делается NAT, а ответы по метке возвращаются в Канал через свою таблицу маршрутизации.
 # Поэтому на VPS1 можно добавлять входные интерфейсы с любыми подсетями, не меняя VPS2.
+#
+# Интерфейс с номером N (outway = 0): метка 0x444e000N (маска 0xffffffff — метки разных интерфейсов
+# не пересекаются), таблица 7100+N (default dev <интерфейс>), приоритет ip rule 31000+N, свой UDP-порт.
+# Все правила привязаны к интерфейсу/метке/порту, поэтому несколько интерфейсов не мешают друг другу.
 set -u
 . "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
-MARK=0x444e0000/0xffff0000   # метка соединений из Канала
-TBL=7100                     # таблица: default dev $OUTWAY_IF
-rules() {
-  local op=$1
-  ipt "$op" iptables mangle PREROUTING -i "$OUTWAY_IF" -j CONNMARK --set-xmark "$MARK"
-  ipt "$op" iptables mangle PREROUTING -i "$WAN_IF" -m connmark --mark "$MARK" -j MARK --set-xmark "$MARK"
+ACT=${1:-}
+case $ACT in
+  channel-up|channel-down) ;;
+  *) echo "usage: $0 channel-up|channel-down [<интерфейс>]" >&2; exit 1 ;;
+esac
+IFN=${2:-}
+if [ -z "$IFN" ]; then IFN=$(outway_default) || IFN=""; fi
+if [ -z "$IFN" ] || ! outway_load "$IFN"; then
+  if [ "$ACT" = channel-down ]; then warn "нет состояния интерфейса '${2:-?}' ($D/outway.d) — правила не сняты"; exit 0; fi
+  die "не найдено состояние интерфейса '${2:-?}' ($D/outway.d/<имя>.env)"
+fi
+[ -n "${WAN_IF:-}" ] || die "в $D/dawg.env не задан WAN_IF"
+MARK=$(printf '0x%08x' $(( 0x444e0000 + OUTWAY_NUM )))/0xffffffff   # метка соединений из этого интерфейса
+OLD_MARK=0x444e0000/0xffff0000   # метка старой установки (только №0): ее правила снимаются при перезапуске
+TBL=$(( 7100 + OUTWAY_NUM ))     # таблица: default dev $OUTWAY_IF
+PREF=$(( 31000 + OUTWAY_NUM ))   # приоритет ip rule
+rules() {  # rules add|del МЕТКА
+  local op=$1 mark=$2
+  ipt "$op" iptables mangle PREROUTING -i "$OUTWAY_IF" -j CONNMARK --set-xmark "$mark"
+  ipt "$op" iptables mangle PREROUTING -i "$WAN_IF" -m connmark --mark "$mark" -j MARK --set-xmark "$mark"
   # собственные пакеты VPS2 по этим соединениям (ICMP Time Exceeded для traceroute, ответы на ping
   # публичного IP через Канал) — тоже в Канал, иначе они уходят в eth0 и теряются
-  ipt "$op" iptables mangle OUTPUT -m connmark --mark "$MARK" -j MARK --set-xmark "$MARK"
-  ipt "$op" iptables nat    POSTROUTING -o "$WAN_IF" -m connmark --mark "$MARK" -j MASQUERADE
+  ipt "$op" iptables mangle OUTPUT -m connmark --mark "$mark" -j MARK --set-xmark "$mark"
+  ipt "$op" iptables nat    POSTROUTING -o "$WAN_IF" -m connmark --mark "$mark" -j MASQUERADE
   ipt "$op" iptables filter FORWARD -i "$OUTWAY_IF" -o "$WAN_IF" -j ACCEPT
   ipt "$op" iptables filter FORWARD -i "$WAN_IF" -o "$OUTWAY_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
   ipt "$op" iptables mangle FORWARD -o "$OUTWAY_IF" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-  ipt "$op" "$IPT_IN" filter INPUT -p udp --dport "$OUTWAY_PORT" -j ACCEPT
+  if [ -n "$OUTWAY_PORT" ]; then ipt "$op" "$IPT_IN" filter INPUT -p udp --dport "$OUTWAY_PORT" -j ACCEPT; fi
 }
-route_del() {
-  while ip -4 rule del pref 31000 fwmark "$MARK" lookup "$TBL" 2>/dev/null; do :; done
+rules_old_del() {  # правила старой установки с маской 0xffff0000 совпали бы с метками остальных интерфейсов
+  if [ "$OUTWAY_NUM" -eq 0 ]; then rules del "$OLD_MARK"; fi
+  return 0
+}
+route_del() {  # только свой приоритет и своя таблица
+  while ip -4 rule del pref "$PREF" lookup "$TBL" 2>/dev/null; do :; done
   ip -4 route flush table "$TBL" 2>/dev/null || true
 }
-case ${1:-} in
+case $ACT in
   channel-up)
     sysctl -qw net.ipv4.ip_forward=1
     rpf_relax "$OUTWAY_IF" || warn "не удалось выключить rp_filter на $OUTWAY_IF — трафик клиентов будет отбрасываться"
-    rules del; rules add
+    rules_old_del; rules del "$MARK"; rules add "$MARK"
     route_del
     ip -4 route replace default dev "$OUTWAY_IF" table "$TBL"
-    ip -4 rule add pref 31000 fwmark "$MARK" lookup "$TBL" ;;
-  channel-down) rules del; route_del ;;
-  *) echo "usage: $0 channel-up|channel-down" >&2; exit 1 ;;
+    ip -4 rule add pref "$PREF" fwmark "$MARK" lookup "$TBL" ;;
+  channel-down) rules_old_del; rules del "$MARK"; route_del ;;
 esac
 exit 0
 HOOKS
 }
-
 src_gate_add() {
   cat <<'GADD'
 #!/bin/bash
@@ -1018,21 +1277,47 @@ src_channel_del() {
 #!/bin/bash
 # DoubleAWG: удалить Канал с этого узла.
 #   VPS1: интерфейс Канала, все входные интерфейсы и клиентов, таймер списка RU.
-#   VPS2: интерфейс Канала.
+#   VPS2: один outway-интерфейс (если указано имя) или все; без имени удаляются все.
 # Правила iptables/ip rule снимаются, правила ufw с пометкой DoubleAWG удаляются.
-#   dawg-channel-del.sh [--yes] [--purge]   (--purge — удалить и пакеты AmneziaWG, модуль, PPA)
+#   dawg-channel-del.sh [<outway>] [--yes] [--purge]   (--purge — удалить и пакеты AmneziaWG, модуль, PPA)
+# Общие файлы (скрипты, dawg.env, sysctl) и пакеты удаляются, только когда на VPS2 не остается
+# ни одного outway-интерфейса. Параметр --keep-shared (для установщика) оставляет общие файлы всегда.
 set -Eeuo pipefail
 . "${DAWG_DIR:-/etc/amnezia/amneziawg}/dawg-lib.sh"
 need_root
-YES=no; PURGE=no
+YES=no; PURGE=no; KEEP=no; NAME=""
 for a in "$@"; do
-  case $a in --yes|-y) YES=yes ;; --purge) PURGE=yes ;; -h|--help) sed -n '2,7p' "$0"; exit 0 ;; *) die "неизвестный параметр: $a" ;; esac
+  case $a in
+    --yes|-y) YES=yes ;;
+    --purge) PURGE=yes ;;
+    --keep-shared) KEEP=yes ;;
+    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    -*) die "неизвестный параметр: $a" ;;
+    *) [ -z "$NAME" ] || die "лишний параметр: $a"; NAME=$a ;;
+  esac
 done
 [ -n "${DAWG_ROLE:-}" ] || die "не найден $D/dawg.env — DoubleAWG на этом узле не установлен"
+outway_remove() {  # outway_remove ИМЯ — остановить и удалить один outway-интерфейс (конфиг, реестр, правила)
+  local n=$1
+  systemctl disable --now "awg-quick@$n" 2>/dev/null || true
+  if link_exists "$n"; then awg-quick down "$n" 2>/dev/null || ip link del "$n" 2>/dev/null || true; fi
+  "$D/dawg-exit.sh" channel-down "$n" 2>/dev/null || true   # на случай, когда PostDown не отработал
+  ufw_dawg_del "DoubleAWG $n "
+  rm -f "$D/$n.conf" "$D/$n.conf".bak-* "$D/outway.d/$n.env" "$D/outway.d/$n.env".bak-*
+  systemctl reset-failed "awg-quick@$n" 2>/dev/null || true
+}
 if [ "$DAWG_ROLE" = entry ]; then
+  [ -z "$NAME" ] || die "имя интерфейса принимает только скрипт выходного узла (VPS2)"
   what="Канал ($INWAY_IF) и входные интерфейсы: $(gates_all | tr '\n' ' ')"
 else
-  what="Канал ($OUTWAY_IF)"
+  ALL=$(outway_list | tr '\n' ' ')
+  if [ -n "$NAME" ]; then
+    case " $ALL " in *" $NAME "*) ;; *) die "outway-интерфейс '$NAME' не найден (есть: ${ALL:-нет})" ;; esac
+    SEL=$NAME
+  else
+    SEL=${ALL% }
+  fi
+  what="outway-интерфейсы: ${SEL:-нет}"
 fi
 if [ "$YES" != yes ]; then confirm "Удалить с этого узла: $what?" N || exit 0; fi
 
@@ -1048,15 +1333,22 @@ if [ "$DAWG_ROLE" = entry ]; then
   rm -rf "${D:?}/dawg-gates" "${D:?}/clients"
   systemctl reset-failed "awg-quick@$INWAY_IF" 2>/dev/null || true
 else
-  systemctl disable --now "awg-quick@$OUTWAY_IF" 2>/dev/null || true
-  if link_exists "$OUTWAY_IF"; then awg-quick down "$OUTWAY_IF" 2>/dev/null || ip link del "$OUTWAY_IF" 2>/dev/null || true; fi
-  "$D/dawg-exit.sh" channel-down 2>/dev/null || true
-  rm -f "$D/$OUTWAY_IF.conf" "$D/$OUTWAY_IF.conf".bak-*
-  systemctl reset-failed "awg-quick@$OUTWAY_IF" 2>/dev/null || true
+  for n in $SEL; do
+    log "Удаление outway-интерфейса $n"
+    outway_remove "$n"
+  done
+  REST=$(outway_list | tr '\n' ' ')
+  if [ -n "${REST// /}" ]; then
+    log "На узле остаются outway-интерфейсы: $REST— общие файлы DoubleAWG сохранены"
+    [ "$PURGE" != yes ] || warn "--purge пропущен: пакеты AmneziaWG нужны оставшимся интерфейсам"
+    exit 0
+  fi
+  rmdir "$D/outway.d" 2>/dev/null || rm -rf "${D:?}/outway.d"
 fi
-ufw_dawg_del "DoubleAWG"
+if [ "$KEEP" = yes ]; then log "Интерфейс удален, общие файлы DoubleAWG сохранены (--keep-shared)"; exit 0; fi
 rm -f /etc/sysctl.d/99-doubleawg.conf
 sysctl -qw "net.ipv4.conf.all.rp_filter=$(cat /proc/sys/net/ipv4/conf/default/rp_filter 2>/dev/null || echo 2)" || true
+ufw_dawg_del "DoubleAWG"
 rm -f "$D"/dawg-*.sh "$D"/dawg-*.sh.bak-* "$D/dawg.env" "$D/dawg.env".bak-*
 if [ "$PURGE" = yes ]; then
   log "Удаление пакетов AmneziaWG"
@@ -1067,7 +1359,6 @@ fi
 log "DoubleAWG удален с узла. net.ipv4.ip_forward остается включенным до перезагрузки."
 CHDEL
 }
-
 # ═════════════════════════ установочные части для узлов ═════════════════════════
 emit_head() {
   cat <<'HEAD'
@@ -1091,13 +1382,8 @@ APT="apt-get -y -q -o DPkg::Lock::Timeout=600"
 HEAD
 }
 
-emit_cleanup() {
-  cat <<'CLEAN'
-# ── предыдущие установки ──
-if [ -f "$D/dawg.env" ] && [ -x "$D/dawg-channel-del.sh" ]; then
-  log "Удаление предыдущей установки DoubleAWG"
-  "$D/dawg-channel-del.sh" --yes || warn "предыдущая установка удалена не полностью"
-fi
+emit_stop_ifaces() {  # остановить уже существующие интерфейсы из $IFACES (имя занято чужим интерфейсом)
+  cat <<'STOP'
 for i in $IFACES; do
   if ip link show "$i" >/dev/null 2>&1; then
     log "Останавливаю существующий интерфейс $i"
@@ -1105,7 +1391,62 @@ for i in $IFACES; do
     if ip link show "$i" >/dev/null 2>&1; then awg-quick down "$i" 2>/dev/null || ip link del "$i" 2>/dev/null || true; fi
   fi
 done
+STOP
+}
+
+emit_cleanup() {  # входной узел: предыдущая установка удаляется целиком (выходной узел — emit_exit_prepare)
+  cat <<'CLEAN'
+# ── предыдущие установки ──
+if [ -f "$D/dawg.env" ] && [ -x "$D/dawg-channel-del.sh" ]; then
+  log "Удаление предыдущей установки DoubleAWG"
+  "$D/dawg-channel-del.sh" --yes || warn "предыдущая установка удалена не полностью"
+fi
 CLEAN
+  emit_stop_ifaces
+}
+
+emit_exit_prepare() {  # выходной узел: перенос старой установки в реестр, замена/добавление интерфейса
+  cat <<'PREP'
+# ── выходной узел: имеющиеся outway-интерфейсы (чужие интерфейсы не трогаем) ──
+install -d -m 700 "$D/outway.d"
+# старая установка (один outway) хранила параметры интерфейса в dawg.env — переносим в реестр как интерфейс №0
+MIGRATED=$( set +u
+  if [ -f "$D/dawg.env" ]; then
+    . "$D/dawg.env"
+    if [ "${DAWG_ROLE:-}" = exit ] && [ -n "${OUTWAY_IF:-}" ] && [ -f "$D/$OUTWAY_IF.conf" ] && [ ! -e "$D/outway.d/$OUTWAY_IF.env" ]; then
+      { echo "# DoubleAWG: outway-интерфейс (перенесено из dawg.env старой установки)"
+        printf '%s=%q\n' OUTWAY_IF "$OUTWAY_IF" OUTWAY_NUM 0 OUTWAY_PORT "${OUTWAY_PORT:-}" \
+          CHANNEL_AWG "${CHANNEL_AWG:-}" IPT_IN "${IPT_IN:-iptables}"
+      } > "$D/outway.d/$OUTWAY_IF.env"
+      chmod 600 "$D/outway.d/$OUTWAY_IF.env"
+      echo "$OUTWAY_IF"
+    fi
+  fi )
+if [ -n "$MIGRATED" ]; then
+  log "Интерфейс $MIGRATED старой установки перенесен в реестр $D/outway.d (номер 0)"
+  # правила старой установки (метка с маской 0xffff0000) пересекались бы с новыми интерфейсами — обновляем их
+  if [ "$MIGRATED" != "$OUTWAY_IF" ] || [ "$EXIT_ACTION" != replace ]; then
+    if ip link show "$MIGRATED" >/dev/null 2>&1; then "$D/dawg-exit.sh" channel-up "$MIGRATED" || warn "не удалось обновить правила $MIGRATED"; fi
+  fi
+fi
+case $EXIT_ACTION in
+  replace)
+    if [ -e "$D/outway.d/$OUTWAY_IF.env" ]; then
+      log "Замена outway-интерфейса $OUTWAY_IF: удаляю только его (остальные интерфейсы не затрагиваются)"
+      "$D/dawg-channel-del.sh" "$OUTWAY_IF" --yes --keep-shared || warn "старый интерфейс $OUTWAY_IF удален не полностью"
+    fi ;;
+  add)
+    if ip link show "$OUTWAY_IF" >/dev/null 2>&1 || [ -e "$D/outway.d/$OUTWAY_IF.env" ] || [ -e "$D/$OUTWAY_IF.conf" ]; then
+      die "интерфейс $OUTWAY_IF уже существует на этом узле — выберите другое имя"
+    fi ;;
+esac
+PREP
+  emit_stop_ifaces
+  cat <<'PREP'
+if ss -Hlun 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$OUTWAY_PORT\$"; then
+  die "UDP-порт $OUTWAY_PORT уже занят на этом узле — запустите установку заново и выберите другой порт"
+fi
+PREP
 }
 
 emit_install() {
@@ -1206,8 +1547,8 @@ gen_all() {
   done
 
   gen_obf "$CH_AWG" "$USE_I1"
-  local b; b=$(hexbytes 5)
-  ULA_NET="fd${b:0:2}:${b:2:4}:${b:6:4}:1"
+  # у каждого Канала своя ULA /64; она не должна совпадать с ULA других outway-интерфейсов этого VPS2
+  gen_ula "$(exit_outway_ulas "$EXIT_REPLACED")"
   OUTWAY_IP6="${ULA_NET}::1"; INWAY_IP6="${ULA_NET}::2"
   local m1 m2 s4; s4=$(obf_s4)
   if [[ $TRANSPORT == 6 ]]; then
@@ -1224,11 +1565,11 @@ gen_all() {
 
 write_local_files() {
   local de="$OUT/servers/entry" dx="$OUT/servers/exit"
-  mkdir -p "$de" "$dx"
+  mkdir -p "$de" "$dx/outway.d"
 
   # ── VPS2 ──
   {
-    echo "# DoubleAWG / AmneziaWG $CH_AWG — выход из Канала (VPS2 ${TARGET[exit]})"
+    echo "# DoubleAWG / AmneziaWG $CH_AWG — выход из Канала (VPS2 ${TARGET[exit]}, outway №$OUTWAY_NUM)"
     echo "[Interface]"
     echo "PrivateKey = $OUTWAY_PRIV"
     echo "Address = ${OUTWAY_IP6}/64"
@@ -1236,8 +1577,8 @@ write_local_files() {
     echo "MTU = $CH_MTU"
     echo "Table = off"
     obf_lines
-    echo "PostUp = $AWG_DIR/dawg-exit.sh channel-up"
-    echo "PostDown = $AWG_DIR/dawg-exit.sh channel-down"
+    echo "PostUp = $AWG_DIR/dawg-exit.sh channel-up $OUTWAY_IF"
+    echo "PostDown = $AWG_DIR/dawg-exit.sh channel-down $OUTWAY_IF"
     echo
     echo "[Peer]"
     echo "# $INWAY_IF @ VPS1 (${TARGET[entry]})"
@@ -1245,11 +1586,17 @@ write_local_files() {
     echo "PresharedKey = $PSK_CH"
     echo "AllowedIPs = ${INWAY_IP6}/128, 0.0.0.0/0"
   } > "$dx/$OUTWAY_IF.conf"
+  local ipt_in; [[ $TRANSPORT == 6 ]] && ipt_in=ip6tables || ipt_in=iptables
   {
-    echo "# DoubleAWG: параметры выходного узла (deploy-doubleawg.sh v$SCRIPT_VERSION, $(date '+%F %T'))"
-    printf '%s=%q\n' DAWG_ROLE exit OUTWAY_IF "$OUTWAY_IF" WAN_IF "${N_IF4[exit]}" \
-      OUTWAY_PORT "$OUTWAY_PORT" IPT_IN "$([[ $TRANSPORT == 6 ]] && echo ip6tables || echo iptables)" CHANNEL_AWG "$CH_AWG"
+    echo "# DoubleAWG: общие параметры выходного узла (deploy-doubleawg.sh v$SCRIPT_VERSION, $(date '+%F %T'))"
+    echo "# Параметры каждого outway-интерфейса — в outway.d/<имя>.env"
+    printf '%s=%q\n' DAWG_ROLE exit WAN_IF "${N_IF4[exit]}" IPT_IN "$ipt_in"
   } > "$dx/dawg.env"
+  {
+    echo "# DoubleAWG: outway-интерфейс $OUTWAY_IF (номер $OUTWAY_NUM: метка 0x$(printf '%08x' $(( 0x444e0000 + OUTWAY_NUM ))), таблица $(( 7100 + OUTWAY_NUM )), приоритет $(( 31000 + OUTWAY_NUM )))"
+    printf '%s=%q\n' OUTWAY_IF "$OUTWAY_IF" OUTWAY_NUM "$OUTWAY_NUM" OUTWAY_PORT "$OUTWAY_PORT" \
+      CHANNEL_AWG "$CH_AWG" IPT_IN "$ipt_in"
+  } > "$dx/outway.d/$OUTWAY_IF.env"
   src_lib         > "$dx/dawg-lib.sh"
   src_exit_hooks  > "$dx/dawg-exit.sh"
   src_channel_del > "$dx/dawg-channel-del.sh"
@@ -1287,8 +1634,8 @@ write_local_files() {
   src_client_add  > "$de/dawg-client-add.sh"
   src_client_del  > "$de/dawg-client-del.sh"
   src_channel_del > "$de/dawg-channel-del.sh"
-  chmod 600 "$de"/* "$dx"/*
-  chmod 700 "$de"/*.sh "$dx"/*.sh
+  find "$de" "$dx" -type f -exec chmod 600 {} +
+  chmod 700 "$de"/*.sh "$dx"/*.sh "$dx/outway.d"
 }
 
 build_bundles() {
@@ -1296,15 +1643,21 @@ build_bundles() {
   # ── VPS2 ──
   {
     echo '#!/bin/bash'
-    printf 'IFACES=%q\n' "$OUTWAY_IF"
-    emit_head; emit_cleanup; emit_install
+    printf 'IFACES=%q\nEXIT_ACTION=%q\nOUTWAY_IF=%q\nOUTWAY_NUM=%q\nOUTWAY_PORT=%q\nCHANNEL_AWG=%q\n' \
+      "$OUTWAY_IF" "$EXIT_ACTION" "$OUTWAY_IF" "$OUTWAY_NUM" "$OUTWAY_PORT" "$CH_AWG"
+    emit_head
+    # общие файлы пишутся первыми: ими пользуется замена интерфейса (dawg-channel-del.sh <имя>) и работающие интерфейсы
     emit_file "$AWG_DIR/dawg-lib.sh"         700 "$OUT/servers/exit/dawg-lib.sh"
-    emit_file "$AWG_DIR/dawg.env"            600 "$OUT/servers/exit/dawg.env"
     emit_file "$AWG_DIR/dawg-exit.sh"        700 "$OUT/servers/exit/dawg-exit.sh"
     emit_file "$AWG_DIR/dawg-channel-del.sh" 700 "$OUT/servers/exit/dawg-channel-del.sh"
-    emit_file "$AWG_DIR/$OUTWAY_IF.conf"     600 "$OUT/servers/exit/$OUTWAY_IF.conf"
+    emit_exit_prepare
+    emit_install
+    emit_file "$AWG_DIR/dawg.env"                  600 "$OUT/servers/exit/dawg.env"
+    emit_file "$AWG_DIR/outway.d/$OUTWAY_IF.env"   600 "$OUT/servers/exit/outway.d/$OUTWAY_IF.env"
+    emit_file "$AWG_DIR/$OUTWAY_IF.conf"           600 "$OUT/servers/exit/$OUTWAY_IF.conf"
     emit_after_files
     cat <<'X'
+. "$D/outway.d/$OUTWAY_IF.env"   # IPT_IN этого интерфейса (в dawg.env — общее значение)
 ufw_dawg_add "DoubleAWG $OUTWAY_IF " \
   "allow $OUTWAY_PORT/udp comment 'DoubleAWG $OUTWAY_IF port'" \
   "route allow in on $OUTWAY_IF out on $WAN_IF comment 'DoubleAWG $OUTWAY_IF internet'"
@@ -1313,7 +1666,7 @@ if [ "$IPT_IN" = ip6tables ] && command -v ufw >/dev/null 2>&1 && ! grep -qs '^I
 fi
 start_iface "$OUTWAY_IF"
 awg show "$OUTWAY_IF" | sed 's/^/    /'
-log "Выходной узел готов"
+log "Выходной узел готов: $OUTWAY_IF (номер $OUTWAY_NUM, UDP-порт $OUTWAY_PORT); все outway: $(outway_list | tr '\n' ' ')"
 X
   } > "$WORK/bundle-exit.sh"
 
@@ -1448,12 +1801,21 @@ write_result() {
     echo "[VPS1 вход]  WAN ${N_IF4[entry]} ${N_PUB4[entry]}; IPv6 ${N_IF6[entry]:-—} ${N_IP6[entry]:-—}"
     echo "[VPS2 выход] ssh ${TARGET[exit]} (порт ${PORT[exit]}); $(nfo exit OS_NAME), ядро $(nfo exit KERNEL)"
     echo "[VPS2 выход] WAN ${N_IF4[exit]} ${N_PUB4[exit]}; IPv6 ${N_IF6[exit]:-—} ${N_IP6[exit]:-—}"
+    case $EXIT_ACTION in
+      new)     echo "[VPS2 выход] outway-интерфейс: $OUTWAY_IF (номер $OUTWAY_NUM, UDP-порт $OUTWAY_PORT) — новая установка" ;;
+      replace) echo "[VPS2 выход] outway-интерфейс: $OUTWAY_IF (номер $OUTWAY_NUM, UDP-порт $OUTWAY_PORT) — ЗАМЕНЕН (старый удален)" ;;
+      add)     echo "[VPS2 выход] outway-интерфейс: $OUTWAY_IF (номер $OUTWAY_NUM, UDP-порт $OUTWAY_PORT) — ДОБАВЛЕН к существующим" ;;
+    esac
+    if [[ -n $(nfo exit OUTWAYS) ]]; then
+      echo "[VPS2 выход] outway-интерфейсы, найденные до установки (имя:номер:порт:ULA): $(nfo exit OUTWAYS)"
+    fi
     echo
     echo "=== КАНАЛ (AmneziaWG $CH_AWG) ==="
-    echo "[$OUTWAY_IF @ VPS2]  адрес ${OUTWAY_IP6}/64, UDP-порт $OUTWAY_PORT, MTU $CH_MTU"
+    echo "[$OUTWAY_IF @ VPS2]  номер $OUTWAY_NUM, адрес ${OUTWAY_IP6}/64, UDP-порт $OUTWAY_PORT, MTU $CH_MTU"
     echo "[$INWAY_IF @ VPS1]   адрес ${INWAY_IP6}/64, Endpoint $CH_ENDPOINT, MTU $CH_MTU"
     echo "Транспорт между VPS: $tr; адреса внутри Канала: IPv6 ULA ${ULA_NET}::/64"
-    echo "VPS2 не знает подсетей клиентов: соединения из Канала помечаются (CONNMARK 0x444e0000), NAT и возврат — по метке."
+    echo "VPS2 не знает подсетей клиентов: соединения из Канала помечаются (CONNMARK $(printf '0x%08x' $(( 0x444e0000 + OUTWAY_NUM )))/0xffffffff), NAT и возврат — по метке"
+    echo "(таблица маршрутизации $(( 7100 + OUTWAY_NUM )), приоритет ip rule $(( 31000 + OUTWAY_NUM )); у каждого outway-интерфейса свои метка, таблица и порт)."
     echo "[$OUTWAY_IF] PrivateKey   = $OUTWAY_PRIV"
     echo "[$OUTWAY_IF] PublicKey    = $OUTWAY_PUB"
     echo "[$INWAY_IF]  PrivateKey   = $INWAY_PRIV"
@@ -1493,7 +1855,9 @@ write_result() {
     echo "VPS1  dawg-client-del.sh <интерфейс> <имя>     — удалить клиента"
     echo "VPS1  dawg-entry.sh split-up|split-down|split-status <интерфейс>, split-update"
     echo "VPS1  dawg-channel-del.sh [--purge]            — удалить Канал, все входные интерфейсы, таймер"
-    echo "VPS2  dawg-channel-del.sh [--purge]            — удалить Канал"
+    echo "VPS2  dawg-channel-del.sh [<outway>] [--purge] — удалить один outway-интерфейс (без имени — все); пакеты — только когда не осталось ни одного"
+    echo "VPS2  dawg-exit.sh channel-up|channel-down <outway> — правила интерфейса (вызывается из PostUp/PostDown его конфига)"
+    echo "VPS2  состояние интерфейсов: $AWG_DIR/outway.d/<имя>.env (имя, номер, порт, версия AWG)"
     echo "      Ключи новых интерфейсов и клиентов генерирует сервер (awg genkey)."
     echo
     echo "=== SPLIT (VPS1) ==="
@@ -1544,6 +1908,7 @@ main() {
   write_probe
   probe_node entry
   probe_node exit
+  fetch_prev_sudo exit
   check_node entry "VPS1"
   check_node exit  "VPS2"
   confirm_node entry "ВХОДНОЙ VPS1"
@@ -1571,17 +1936,12 @@ main() {
 
   # ── 4. Имена интерфейсов ──
   printf '\n%sИмена интерфейсов%s\n' "$C_B" "$C_0" >&2
-  ask OUTWAY_IF   "Выход из Канала на VPS2"                    "outway"
+  choose_exit_action   # EXIT_ACTION (new|replace|add), OUTWAY_IF, OUTWAY_NUM, EXIT_OLD_PORT, EXIT_REPLACED
   ask INWAY_IF    "Вход в Канал на VPS1"                       "inway"
   ask GATE_PREFIX "Префикс входных интерфейсов клиентов (VPS1)" "gate"
-  valid_ifname "$OUTWAY_IF" || die "Имя '$OUTWAY_IF': до 15 символов, латиница, цифры, _ = + . -"
   valid_ifname "$INWAY_IF"  || die "Имя '$INWAY_IF': до 15 символов, латиница, цифры, _ = + . -"
   [[ $GATE_PREFIX =~ ^[A-Za-z_][A-Za-z0-9_=+.-]{0,11}$ ]] || die "Префикс '$GATE_PREFIX': до 12 символов, начинается с буквы"
   [[ ! $INWAY_IF =~ ^${GATE_PREFIX//./\\.}[0-9]+$ ]] || die "Имя '$INWAY_IF' пересекается с именами входных интерфейсов ${GATE_PREFIX}N"
-  if link_on_node exit "$OUTWAY_IF" && [[ $(nfo exit PREV) != v2 ]]; then
-    warn "На VPS2 уже есть интерфейс $OUTWAY_IF — он будет остановлен и перезаписан."
-    confirm "Продолжить?" N || exit 1
-  fi
   if link_on_node entry "$INWAY_IF" && [[ $(nfo entry PREV) != v2 ]]; then
     warn "На VPS1 уже есть интерфейс $INWAY_IF — он будет остановлен и перезаписан."
     confirm "Продолжить?" N || exit 1
@@ -1590,8 +1950,17 @@ main() {
   # ── 5. Параметры Канала ──
   printf '\n%sКанал%s\n' "$C_B" "$C_0" >&2
   ask_awg_version CH_AWG "Версия AmneziaWG для Канала (1, 1.5, 2, 3, 3.1)" "2"
-  ask OUTWAY_PORT "UDP-порт $OUTWAY_IF на VPS2" "$(rnd 20000 60999)"
-  is_port "$OUTWAY_PORT" || die "Некорректный UDP-порт"
+  local def_port=${EXIT_OLD_PORT:-$(free_udp_port "$(exit_ports_used)")}   # при замене старый порт сохраняется
+  while :; do
+    ask OUTWAY_PORT "UDP-порт $OUTWAY_IF на VPS2" "$def_port"
+    is_port "$OUTWAY_PORT" || die "Некорректный UDP-порт"
+    if [[ $OUTWAY_PORT != "${EXIT_OLD_PORT-}" && " $(exit_ports_used) " == *" $OUTWAY_PORT "* ]]; then
+      warn "UDP-порт $OUTWAY_PORT уже занят на VPS2 (другой outway-интерфейс или служба) — выберите другой"
+      def_port=$(free_udp_port "$(exit_ports_used)")
+      continue
+    fi
+    break
+  done
   ask CLIENT_DNS "DNS для клиентов" "1.1.1.1, 1.0.0.1"
   USE_I1=no
   if confirm "Добавлять I1 (имитация QUIC Initial перед рукопожатием; для версий 1.5+)?" Y; then USE_I1=yes; fi
@@ -1669,6 +2038,12 @@ main() {
   local trs i; [[ $TRANSPORT == 6 ]] && trs="IPv6" || trs="IPv4"
   printf '\n%sИтог%s\n' "$C_B" "$C_0" >&2
   printf '  Канал: %s (VPS1) -> %s (VPS2) %s, AWG %s, транспорт %s, MTU %s\n' "$INWAY_IF" "$OUTWAY_IF" "$CH_ENDPOINT" "$CH_AWG" "$trs" "$CH_MTU" >&2
+  case $EXIT_ACTION in
+    new)     printf '  VPS2: новый outway-интерфейс %s (номер %s, порт %s)\n' "$OUTWAY_IF" "$OUTWAY_NUM" "$OUTWAY_PORT" >&2 ;;
+    replace) printf '  VPS2: ЗАМЕНА outway-интерфейса %s (номер %s, порт %s); остальные интерфейсы не затрагиваются\n' "$OUTWAY_IF" "$OUTWAY_NUM" "$OUTWAY_PORT" >&2 ;;
+    add)     printf '  VPS2: ДОБАВЛЕНИЕ outway-интерфейса %s (номер %s, порт %s); существующие (%s) не затрагиваются\n' \
+               "$OUTWAY_IF" "$OUTWAY_NUM" "$OUTWAY_PORT" "$(exit_outway_names | tr '\n' ' ' | sed 's/ $//')" >&2 ;;
+  esac
   printf '  Выход в интернет: %s через %s (NAT)\n' "${N_PUB4[exit]}" "${N_IF4[exit]}" >&2
   for (( i = 1; i <= NG; i++ )); do
     printf '  %s: AWG %s, %s, порт %s, сеть %s, split %s, клиент %s%s\n' "${GATE_PREFIX}$i" "${G_AWG[i]}" "${G_MODE[i]}" \
@@ -1690,8 +2065,8 @@ main() {
   esac
   write_result
   case $rc in
-    0) ok "VPS1 настроен, Канал работает" ;;
-    3) warn "VPS1 настроен, но Канал не поднялся. Проверьте firewall провайдера (UDP $OUTWAY_PORT на $CH_ENDPOINT) и 'sudo awg show' на обоих узлах." ;;
+    0) ok "VPS1 настроен, Канал работает: $INWAY_IF -> $OUTWAY_IF (VPS2, номер $OUTWAY_NUM, UDP-порт $OUTWAY_PORT)" ;;
+    3) warn "VPS1 настроен, но Канал $INWAY_IF -> $OUTWAY_IF (номер $OUTWAY_NUM) не поднялся. Проверьте firewall провайдера (UDP $OUTWAY_PORT на $CH_ENDPOINT) и 'sudo awg show' на обоих узлах." ;;
     *) die "Ошибка на VPS1 (код $rc). Файлы: $OUT" ;;
   esac
 

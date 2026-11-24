@@ -151,8 +151,19 @@ Client configs are saved in `/etc/amnezia/amneziawg/clients/<interface>/<client>
 ### VPS2 (exit)
 
 ```bash
-sudo /etc/amnezia/amneziawg/dawg-channel-del.sh [--purge]
+sudo /etc/amnezia/amneziawg/dawg-channel-del.sh [outway2] [--purge]   # without a name: remove all outway interfaces
 ```
+
+## Several entry VPS on one exit VPS
+
+One VPS2 can host several outway interfaces (`outway`, `outway2`, …), one for each entry VPS. Each has its own port, keys and Channel IPv6 subnet. VPS2 still does not know client subnets, so different entry VPS can use any subnets.
+
+To attach another entry VPS to an existing exit VPS, run the script again and give the existing VPS2. The script finds the outway interfaces and asks what to do:
+
+1. **replace (reconfigure)** the found interface. The entry VPS connected to it loses its Channel until it is reconfigured;
+2. **add** a new interface (default). The other interfaces are not touched.
+
+For non-interactive runs: `EXIT_ACTION=add|replace` and `EXIT_OUTWAY=<interface name>`.
 
 ## Split routing
 
@@ -187,8 +198,8 @@ TCP MSS clamping is enabled on both VPSes. The client's MTU must match its entry
 - Each interface's firewall rules are added in `PostUp` and removed in `PostDown` (`dawg-entry.sh`).
 
 **VPS2:**
-- Connections that arrive from `outway` are marked (`CONNMARK 0x444e0000/0xffff0000`), and NAT is applied by that mark.
-- Replies, and VPS2's own ICMP packets (traceroute), are routed back into the Channel through table `7100` using the mark.
+- Connections that arrive from `outway` are marked (`CONNMARK`), and NAT is applied by that mark.
+- Replies, and VPS2's own ICMP packets (traceroute), are routed back into the Channel through a routing table using the mark. Each outway interface has a number N: mark `0x444e000N`, table `7100+N`, `ip rule` `31000+N` (the first interface is N=0). Interface state is kept in `outway.d/<interface>.env`.
 
 **rp_filter**: the Channel interfaces have no IPv4 address, so reverse-path filtering (`rp_filter`) is turned off on them. The global `all` setting is lowered to 0, and every other interface keeps its previous level. On the Channel interfaces, AmneziaWG itself checks packet sources through `AllowedIPs`.
 
@@ -201,7 +212,7 @@ sudo /etc/amnezia/amneziawg/dawg-channel-del.sh --purge   # VPS1 first
 sudo /etc/amnezia/amneziawg/dawg-channel-del.sh --purge   # then VPS2
 ```
 
-`net.ipv4.ip_forward` stays enabled until the next reboot. Running `deploy-doubleawg.sh` again finds and removes the previous installation on both nodes by itself, but that also removes every client, and new keys are generated.
+`net.ipv4.ip_forward` stays enabled until the next reboot. Running `deploy-doubleawg.sh` again on an entry VPS removes its previous installation (with all clients; new keys are generated). On an exit VPS the installation is not removed: the script offers to replace the found outway interface or add a new one.
 
 ## Troubleshooting
 
