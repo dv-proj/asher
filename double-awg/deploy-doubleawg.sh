@@ -2079,6 +2079,6 @@ main() {
   printf '  Управление на VPS1: sudo %s/dawg-client-add.sh <интерфейс> <имя>, dawg-gate-add.sh и др. (см. файл результата)\n' "$AWG_DIR" >&2
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+if [[ -z ${BASH_SOURCE[0]-} || ${BASH_SOURCE[0]} == "$0" ]]; then   # пусто — запуск через curl | bash
   main "$@"
 fi
